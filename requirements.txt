@@ -1,0 +1,3 @@
+# [voice] pulls in PyNaCl for voice-channel sound effects (optional feature).
+# Sound playback also needs the FFmpeg binary installed on the host.
+discord.py[voice]>=2.3,<3
