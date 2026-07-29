@@ -1,10 +1,15 @@
-# 🀄 리치마작 디스코드 봇 (Riichi Mahjong Bot)
+# 🀄 I WANNA PLAY MAHJONG
 
-디스코드에서 **버튼으로 즐기는 3인/4인 리치마작** 봇입니다.
+**디스코드에서 버튼으로 즐기는 3인 / 4인 리치마작 봇**
+
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
+[![discord.py](https://img.shields.io/badge/discord.py-2.3+-5865F2?logo=discord&logoColor=white)](https://discordpy.readthedocs.io/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 패 기호나 명령어를 외울 필요 없이 **타일 버튼을 클릭**해서 플레이해요 — 개발자가 아니어도 편하게!
 쯔모·론·리치·후로(치/퐁/깡)·도라·역/점수 계산까지 포함한 실제 룰 기반 엔진을 갖췄습니다.
 
-> 언어: Python · 라이브러리: [discord.py](https://discordpy.readthedocs.io/)
+📖 [사용법 가이드](docs/사용법.md) · ☁️ [배포 가이드](docs/배포-oracle.md) · 🔊 [효과음 설정](sounds/README.md)
 
 ## 🕹 이렇게 플레이해요 (버튼)
 
@@ -117,6 +122,7 @@ DISCORD_TOKEN=여기에_복사한_토큰
 ├── bot.py                 # 디스코드 명령어 + 게임 진행 드라이버
 ├── requirements.txt
 ├── .env.example
+├── LICENSE
 ├── run.sh / run.bat       # 로컬 실행 스크립트
 ├── deploy/                # 오라클 클라우드 배포 (systemd + 설치 스크립트)
 ├── docs/                  # 사용법 · 배포 가이드
@@ -172,6 +178,15 @@ python tests/test_calls.py
 - 대국 종료 조건은 "누군가 0점 미만"으로 단순화 (동/남장 지정 종료 미구현)
 
 엔진은 모듈화되어 있어 위 규칙들을 점진적으로 추가하기 쉽습니다.
+
+---
+
+## 📄 라이선스
+
+[MIT](LICENSE) — 자유롭게 쓰고 고치고 배포하세요.
+
+> `sounds/` 에 넣는 효과음 파일은 이 라이선스와 별개예요.
+> 각 파일의 출처/라이선스를 확인하고 사용하세요.
 
 ---
 
