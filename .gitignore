@@ -3,3 +3,6 @@ __pycache__/
 .env
 .venv/
 venv/
+
+# 서버별로 업로드된 효과음 (`!mj sound`) — 런타임 데이터라 커밋하지 않음
+sounds/*/

@@ -40,15 +40,30 @@ TURN_TIMEOUT = 120  # auto-discard if a human goes AFK
 
 # Optional sound effects: drop files like riichi.mp3 / ron.mp3 in sounds/.
 # Missing files (or missing voice deps) are silently skipped.
+#
+# Lookup order for a guild: sounds/<guild_id>/<name>.<ext> (uploaded in that
+# server via `!mj sound`) → sounds/<name>.<ext> (shipped default). So each
+# server can customise its own effects without affecting anyone else.
 SOUNDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")
 SOUND_EXTS = (".mp3", ".ogg", ".wav", ".m4a")
+SOUND_NAMES = ("riichi", "ron", "tsumo", "pon", "chi", "kan")
+MAX_SOUND_BYTES = 1024 * 1024  # 1 MB — effects should be short
 
 
-def sound_path(name: str) -> str | None:
-    for ext in SOUND_EXTS:
-        p = os.path.join(SOUNDS_DIR, name + ext)
-        if os.path.exists(p):
-            return p
+def guild_sounds_dir(guild_id: int) -> str:
+    return os.path.join(SOUNDS_DIR, str(guild_id))
+
+
+def sound_path(name: str, guild_id: int | None = None) -> str | None:
+    dirs = []
+    if guild_id is not None:
+        dirs.append(guild_sounds_dir(guild_id))
+    dirs.append(SOUNDS_DIR)
+    for d in dirs:
+        for ext in SOUND_EXTS:
+            p = os.path.join(d, name + ext)
+            if os.path.exists(p):
+                return p
     return None
 
 
@@ -57,7 +72,8 @@ def play_sound(table: "Table", name: str) -> None:
     vc = table.voice
     if not vc or not vc.is_connected():
         return
-    path = sound_path(name)
+    guild = getattr(table.channel, "guild", None)
+    path = sound_path(name, guild.id if guild else None)
     if not path:
         return
     table.sound_queue.append(path)
@@ -797,10 +813,111 @@ async def end_game(table: Table, reason: str):
 
 
 # ---------------------------------------------------------------------------
+# sound effect management (`!mj sound ...`) — per server, admins only
+# ---------------------------------------------------------------------------
+SOUND_HELP = (
+    "🔊 **효과음 설정** (서버 관리자 전용)\n"
+    f"등록 가능: {' · '.join(f'`{n}`' for n in SOUND_NAMES)}\n"
+    "· `!mj sound` — 현재 등록된 효과음 목록\n"
+    "· `!mj sound <이름>` + **음성파일 첨부** — 등록/교체\n"
+    "· `!mj sound clear <이름>` — 삭제 (`clear all` 이면 전체)\n"
+    f"파일: {' / '.join(SOUND_EXTS)} · 최대 {MAX_SOUND_BYTES // 1024}KB · 짧게(1~3초) 권장"
+)
+
+
+def _is_sound_admin(ctx) -> bool:
+    perms = getattr(ctx.author, "guild_permissions", None)
+    return bool(perms and (perms.manage_guild or perms.administrator))
+
+
+async def sound_cmd(ctx, args: list[str]):
+    if ctx.guild is None:
+        await ctx.send("효과음 설정은 서버 채널에서만 할 수 있어요.")
+        return
+
+    # list ---------------------------------------------------------------
+    if not args or args[0] in ("list", "목록"):
+        lines = []
+        for n in SOUND_NAMES:
+            own = sound_path(n, ctx.guild.id)
+            if own and own.startswith(guild_sounds_dir(ctx.guild.id)):
+                lines.append(f"· `{n}` — ✅ 이 서버 전용 ({os.path.splitext(own)[1]})")
+            elif own:
+                lines.append(f"· `{n}` — 🌐 기본 효과음")
+            else:
+                lines.append(f"· `{n}` — ❌ 없음")
+        await ctx.send("🔊 **이 서버의 효과음**\n" + "\n".join(lines)
+                       + f"\n\n{SOUND_HELP}")
+        return
+
+    # clear ---------------------------------------------------------------
+    if args[0] in ("clear", "삭제"):
+        if not _is_sound_admin(ctx):
+            await ctx.send("서버 관리자만 효과음을 바꿀 수 있어요.")
+            return
+        target = args[1] if len(args) > 1 else None
+        if target not in SOUND_NAMES and target != "all":
+            await ctx.send(f"사용법: `!mj sound clear <{'|'.join(SOUND_NAMES)}|all>`")
+            return
+        names = SOUND_NAMES if target == "all" else (target,)
+        removed = []
+        for n in names:
+            for ext in SOUND_EXTS:
+                p = os.path.join(guild_sounds_dir(ctx.guild.id), n + ext)
+                if os.path.exists(p):
+                    os.remove(p)
+                    removed.append(n)
+        if removed:
+            await ctx.send(f"🗑 삭제했어요: {', '.join(f'`{n}`' for n in removed)}"
+                           " (기본 효과음이 있으면 그걸로 돌아가요)")
+        else:
+            await ctx.send("지울 게 없어요 (이 서버에 등록된 효과음이 없음).")
+        return
+
+    # upload --------------------------------------------------------------
+    name = args[0]
+    if name not in SOUND_NAMES:
+        await ctx.send(f"`{name}` 은(는) 모르는 이름이에요.\n\n{SOUND_HELP}")
+        return
+    if not _is_sound_admin(ctx):
+        await ctx.send("서버 관리자만 효과음을 등록할 수 있어요.")
+        return
+    if not ctx.message.attachments:
+        await ctx.send(f"음성 파일을 **첨부**해서 다시 보내주세요.\n\n{SOUND_HELP}")
+        return
+
+    att = ctx.message.attachments[0]
+    ext = os.path.splitext(att.filename)[1].lower()
+    if ext not in SOUND_EXTS:
+        await ctx.send(f"지원하지 않는 형식이에요 ({ext or '확장자 없음'}). "
+                       f"{' / '.join(SOUND_EXTS)} 중 하나로 올려주세요.")
+        return
+    if att.size > MAX_SOUND_BYTES:
+        await ctx.send(f"파일이 너무 커요 ({att.size // 1024}KB). "
+                       f"{MAX_SOUND_BYTES // 1024}KB 이하로 올려주세요.")
+        return
+
+    dest_dir = guild_sounds_dir(ctx.guild.id)
+    os.makedirs(dest_dir, exist_ok=True)
+    for old in SOUND_EXTS:  # replace any existing version of this effect
+        p = os.path.join(dest_dir, name + old)
+        if os.path.exists(p):
+            os.remove(p)
+    try:
+        await att.save(os.path.join(dest_dir, name + ext))
+    except Exception as exc:
+        print(f"[sound] save failed: {exc}")
+        await ctx.send("저장에 실패했어요. 잠시 후 다시 시도해 주세요.")
+        return
+    await ctx.send(f"✅ `{name}` 효과음을 이 서버에 등록했어요! ({ext}, "
+                   f"{att.size // 1024}KB)")
+
+
+# ---------------------------------------------------------------------------
 # entry command
 # ---------------------------------------------------------------------------
 @bot.command(name="mj")
-async def mj_cmd(ctx, arg: str = None):
+async def mj_cmd(ctx, arg: str = None, *rest: str):
     if arg in ("help", "도움", "도움말"):
         await ctx.send(
             "🀄 **리치마작 봇**\n"
@@ -808,11 +925,15 @@ async def mj_cmd(ctx, arg: str = None):
             "손패 방식은 로비에서 전환할 수 있어요:\n"
             "· 📱 **채널(모바일)**: 채널의 **🎴 내 손패** 버튼 → 나만 보이는 손패. DM 전환 없음\n"
             "· 💻 **DM(PC)**: 손패가 DM으로 자동으로 와요 (DM 허용 필요)\n"
-            "남이 버리면 **🔔 콜**(채널) 또는 DM으로 론/퐁/치/깡/스킵 버튼이 떠요.")
+            "남이 버리면 **🔔 콜**(채널) 또는 DM으로 론/퐁/치/깡/스킵 버튼이 떠요.\n"
+            "🔊 효과음: `!mj sound` (서버 관리자만 등록/삭제 가능)")
+        return
+    if arg in ("sound", "효과음"):
+        await sound_cmd(ctx, list(rest))
         return
     size = 3 if arg == "3" else 4
     if arg not in (None, "3", "4"):
-        await ctx.send("사용법: `!mj` (4인) · `!mj 3` (3인) · `!mj help`")
+        await ctx.send("사용법: `!mj` (4인) · `!mj 3` (3인) · `!mj sound` · `!mj help`")
         return
     if ctx.channel.id in tables:
         await ctx.send("이미 이 채널에 게임이 있어요.")
