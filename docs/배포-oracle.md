@@ -10,28 +10,62 @@
 
 ## 1. VM 만들기 (오라클 콘솔)
 
-1. https://cloud.oracle.com 가입/로그인 (카드 등록 필요, **Always Free는 과금 안 됨**)
-2. **Compute → Instances → Create Instance**
-3. 이미지: **Canonical Ubuntu** (예: 22.04)
-4. Shape (둘 중 아무거나, 둘 다 Always Free):
-   - **VM.Standard.A1.Flex** (Ampere ARM) — 넉넉함. 이 봇엔 1 OCPU / 1~2GB면 충분
-   - **VM.Standard.E2.1.Micro** (x86) — 1GB, 이 봇엔 이것도 OK
-5. **SSH 키**: 콘솔에서 "Generate a key pair for me" 로 **private key 저장** (또는 내 공개키 붙여넣기)
-6. **Create** → 인스턴스의 **Public IP** 확인
+> 💻 이 단계는 **PC 브라우저**를 추천해요. 콘솔이 복잡해서 폰으로는 버거워요.
+> (폰만 있다면 크롬 ⋮ → **데스크톱 사이트** 켜고 진행)
+
+### 1-1. 가입
+
+https://cloud.oracle.com 에서 **Start for free** → 가입.
+
+- **카드 등록 필요** — 본인 확인용이고 **Always Free 자원만 쓰면 과금 안 돼요**
+  (가입 후 30일 무료 크레딧이 끝나도 Always Free 자원은 계속 유지돼요)
+- **홈 리전(Home Region)** 은 **나중에 못 바꿔요.** 한국이면 `South Korea Central (Seoul)`
+  또는 `South Korea North (Chuncheon)` 선택
+
+### 1-2. 인스턴스 생성
+
+콘솔 좌측 **☰ 메뉴 → Compute → Instances → Create instance**
+
+| 항목 | 선택할 것 |
+|---|---|
+| **Name** | 아무거나 (예: `mahjong-bot`) |
+| **Image** | **Canonical Ubuntu** (22.04 또는 24.04) — `Edit` → `Change image` 에서 변경 |
+| **Shape** | 아래 참고 |
+| **Networking** | 기본값 그대로. **"Assign a public IPv4 address" 가 Yes** 인지만 확인 ⭐ |
+| **SSH keys** | **Generate a key pair for me** → **Save private key** 로 키 파일 다운로드 ⭐ |
+
+**Shape 고르기** (`Edit` → `Change shape`, 둘 다 Always Free):
+
+- **VM.Standard.A1.Flex** (Ampere ARM) — **1 OCPU / 6GB** 정도로 잡으면 충분하고 넉넉해요
+- **VM.Standard.E2.1.Micro** (x86, 1GB) — 이 봇엔 이것도 충분
+
+> ⚠️ **"Out of host capacity" 에러**가 자주 떠요 (A1 인기가 많아서).
+> 그럴 땐 ① 다른 **Availability Domain**(AD-1/2/3) 선택 ② 잠시 후 재시도
+> ③ 그래도 안 되면 **E2.1.Micro** 로 만드세요. 이 봇은 1GB로도 잘 돌아가요.
+
+**Create** 누르고 상태가 **RUNNING** 되면 완료 — 화면의 **Public IP address** 를 복사해두세요.
+
+> 🔓 인바운드 포트는 **열 필요 없어요.** 봇은 밖으로만 연결하거든요.
+> 보안 목록(Security List)이나 방화벽 건드리지 마세요.
 
 ---
 
 ## 2. SSH 접속
 
 ```bash
-# 다운받은 키 권한 (한 번만)
+# 다운받은 키 권한 (한 번만) — 맥/리눅스
 chmod 600 ~/Downloads/ssh-key-*.key
 
 # Ubuntu 이미지의 기본 유저는 ubuntu
 ssh -i ~/Downloads/ssh-key-*.key ubuntu@<Public-IP>
 ```
 
-> 📱 폰만 있다면 **Termius** 같은 SSH 앱으로도 접속 가능해요.
+처음 접속하면 `Are you sure you want to continue connecting?` → **yes** 입력.
+
+- **윈도우**: PowerShell 에서 위 명령 그대로 (또는 PuTTY)
+- **폰**: **Termius** 같은 SSH 앱에 키 파일 넣어서 접속
+- ❗ `Permission denied` 면 → 키 경로/권한 확인, 유저명이 `ubuntu` 인지 확인
+  (Oracle Linux 이미지를 골랐다면 `opc`)
 
 ---
 
