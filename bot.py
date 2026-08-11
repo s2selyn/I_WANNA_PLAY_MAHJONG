@@ -190,6 +190,15 @@ class Table:
         self.seats.append(Player(seat=len(self.seats), name=f"AI-{self._ai}", is_ai=True))
         return True
 
+    def shuffle_seats(self) -> None:
+        """Randomise seating once, at game start (real mahjong draws for seats).
+
+        Seats stay fixed for the rest of the game; only the dealer rotates.
+        """
+        random.shuffle(self.seats)
+        for i, p in enumerate(self.seats):
+            p.seat = i
+
     def remove_human(self, user_id: int) -> bool:
         """Leave an unstarted lobby. Seats are renumbered to stay 0..n-1."""
         if self.started:
@@ -484,6 +493,20 @@ class ControlView(discord.ui.View):
         self.add_item(Btn("🎴 내 손패", self._hand, style=discord.ButtonStyle.primary))
         self.add_item(Btn("🔔 콜", self._call, style=discord.ButtonStyle.secondary))
         self.add_item(Btn("⚙️ 내 방식", self._my_mode, style=discord.ButtonStyle.secondary))
+        self.add_item(Btn("🚪 나가기", self._leave_game, style=discord.ButtonStyle.danger))
+
+    async def _leave_game(self, interaction: discord.Interaction):
+        """Drop out mid-game — the AI takes over the seat so the hand continues."""
+        t = self.table
+        if t.seat_of(interaction.user.id) is None:
+            await interaction.response.send_message("이 게임의 플레이어가 아니에요.",
+                                                    ephemeral=True)
+            return
+        name = interaction.user.display_name
+        await interaction.response.send_message(
+            "🚪 나갔어요. 남은 자리는 AI가 이어서 둘게요.", ephemeral=True)
+        await t.channel.send(f"🚪 **{name}** 님이 나가서 **AI가 대신** 둡니다 🤖")
+        await leave_mid_game(t, interaction.user.id)
 
     async def _my_mode(self, interaction: discord.Interaction):
         """Toggle *this player's* hand delivery, independent of the table default."""
@@ -615,9 +638,11 @@ class LobbyView(discord.ui.View):
             return
         if t.started:
             return
+        t.shuffle_seats()
         t.started = True
         await interaction.response.edit_message(content="🀄 대국 시작!",
                                                 view=disable_view(self))
+        await t.channel.send(seating_line(t))
         await start_round(t)
 
     async def _fill_start(self, interaction):
@@ -628,9 +653,11 @@ class LobbyView(discord.ui.View):
             return
         while len(t.seats) < t.size:
             t.add_ai()
+        t.shuffle_seats()
         t.started = True
         await interaction.response.edit_message(content="🤖 빈자리를 AI로 채우고 🀄 대국 시작!",
                                                 view=disable_view(self))
+        await t.channel.send(seating_line(t))
         await start_round(t)
 
     async def _cancel(self, interaction):
@@ -649,6 +676,36 @@ async def announce_discard(table: Table, p: Player, tile: Tile, silent: bool = F
     if silent:
         return
     await update_board(table, note=f"🀫 **{p.name}** 버림 → {tile_glyph(tile)}")
+
+
+def seating_line(table: Table) -> str:
+    order = " · ".join(f"{i+1}. {p.name}" for i, p in enumerate(table.seats))
+    return f"🎲 **자리 정하기** (무작위) — {order}"
+
+
+async def leave_mid_game(table: Table, user_id: int) -> bool:
+    """Hand a seat over to the AI so a player can drop out mid-hand."""
+    seat = table.seat_of(user_id)
+    r = table.round
+    if seat is None or r is None or not table.started:
+        return False
+    p = table.seats[seat]
+    p.is_ai = True
+    p.name = f"{p.name} 🤖"
+    p.user_id = 0
+    table.player_modes.pop(user_id, None)
+
+    if not any(not q.is_ai for q in table.seats):
+        await table.channel.send("🚪 사람이 모두 나가서 대국을 종료할게요.")
+        await end_game(table, "남은 플레이어가 없습니다.")
+        return True
+
+    # 그 사람 차례였거나 콜 대기 중이었으면 판이 멈추지 않게 이어줘요
+    if table.awaiting and seat in table.call_eligible and seat not in table.call_choices:
+        await record_call(table, seat, "skip", None)
+    elif r.phase == "action" and r.turn == seat:
+        await advance(table)
+    return True
 
 
 async def start_round(table: Table):
