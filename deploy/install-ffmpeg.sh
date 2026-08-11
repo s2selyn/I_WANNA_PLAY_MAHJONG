@@ -4,6 +4,12 @@
 #
 #   bash /opt/mahjong-bot/deploy/install-ffmpeg.sh
 #
+# SSH 를 끊고 자리를 뜰 거라면 systemd 에 맡기세요 (창을 닫아도 끝까지 진행돼요):
+#
+#   sudo systemd-run --unit=mj-ffmpeg --setenv=STOP_BOT=1 \
+#       bash /opt/mahjong-bot/deploy/install-ffmpeg.sh
+#   systemctl status mj-ffmpeg      # 나중에 결과 확인
+#
 # 그냥 `dnf install ffmpeg-free` 를 하면 dnf 가 모든 저장소 메타데이터를 메모리에
 # 올리고 권장(weak) 의존성까지 끌어와서 OOM 으로 죽습니다. 여기서는
 #   1) 필요한 저장소만 켜고
@@ -44,7 +50,8 @@ restore_bot() {
     sudo systemctl start "$BOT_UNIT"
   fi
 }
-trap restore_bot EXIT
+# SSH 가 끊겨(HUP) 중간에 죽더라도 봇은 반드시 다시 켜지도록
+trap restore_bot EXIT INT TERM HUP
 
 echo "==> dnf 캐시 정리"
 sudo dnf clean all >/dev/null 2>&1 || true
