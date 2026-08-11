@@ -984,6 +984,14 @@ async def mj_cmd(ctx, arg: str = None, *rest: str):
     if arg in ("sound", "효과음"):
         await sound_cmd(ctx, list(rest))
         return
+    if ctx.guild is None:
+        # DM 에서는 로비를 열 수 없어요 — 여러 명이 참가해야 하고, 나만 보이는
+        # 손패·음성 효과음 같은 기능이 서버 채널을 전제로 하거든요.
+        await ctx.send(
+            "🀄 대국은 **서버 채널**에서 열어주세요! (DM에서는 방을 만들 수 없어요)\n"
+            "서버 채널에서 `!mj` 를 치면 로비가 열려요.\n"
+            "_손패를 DM으로 받고 싶으면, 게임 중 채널의 **⚙️ 내 방식** 버튼을 누르면 돼요._")
+        return
     size = 3 if arg == "3" else 4
     if arg not in (None, "3", "4"):
         # 모르는 말이어도 무뚝뚝하게 굴지 않기 — 인사부터 하고 메뉴를 안내해요
