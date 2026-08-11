@@ -220,6 +220,11 @@ class Table:
         self.call_task: asyncio.Task | None = None
         self.call_resolved = False
 
+        # AFK guard: turn_token identifies "this exact turn" so a timer that
+        # wakes up late can tell it is stale and do nothing.
+        self.afk_task: asyncio.Task | None = None
+        self.turn_token = 0
+
     # lobby ----------------------------------------------------------------
     def add_human(self, user) -> bool:
         if any(p.user_id == user.id for p in self.seats) or len(self.seats) >= self.size:
@@ -284,6 +289,14 @@ class Table:
 
     def round_wind_name(self) -> str:
         return kind_kr([27, 28, 29, 30][self.round_wind_idx])
+
+    def cancel_timers(self) -> None:
+        """Stop every pending timer — call when a game ends or is torn down."""
+        for name in ("afk_task", "call_task", "lobby_task"):
+            task = getattr(self, name)
+            if task is not None and not task.done():
+                task.cancel()
+            setattr(self, name, None)
 
     # voice ----------------------------------------------------------------
     async def join_voice(self, member) -> None:
@@ -809,8 +822,13 @@ async def start_round(table: Table):
 async def send_turn(table: Table, seat: int):
     p = table.round.players[seat]
     await update_board(table)  # move the ▶️ marker to this player
-    # 자리를 비워도 판이 멈추지 않도록, 방식과 무관하게 AFK 보호를 걸어둬요
-    asyncio.create_task(_turn_afk(table, seat, len(p.discards)))
+    # 자리를 비워도 판이 멈추지 않도록, 방식과 무관하게 AFK 보호를 걸어둬요.
+    # 이전 차례의 타이머는 확실히 취소하고, 이번 차례에만 유효한 토큰을 넘겨요.
+    if table.afk_task is not None and not table.afk_task.done():
+        table.afk_task.cancel()
+    table.turn_token += 1
+    table.afk_task = asyncio.create_task(
+        _turn_afk(table, seat, len(p.discards), table.round, table.turn_token))
     if table.mode_of(p.user_id) == "dm":
         try:
             dm = await dm_of(p.user_id)
@@ -915,10 +933,18 @@ async def _lobby_expiry(table: Table):
             pass
 
 
-async def _turn_afk(table: Table, seat: int, ndiscards: int):
-    """AFK guard: auto-discard if the player never acts (both modes)."""
+async def _turn_afk(table: Table, seat: int, ndiscards: int, rnd, token: int):
+    """AFK guard: auto-discard if the player never acts (both modes).
+
+    ``rnd``/``token`` pin this timer to one specific turn. Without them a timer
+    from an earlier hand could wake up after the deal reset everyone's discards
+    and match the conditions again, forcing a phantom discard and starting a
+    second ``advance()`` loop on a table that had already finished.
+    """
     await asyncio.sleep(TURN_TIMEOUT)
     r = table.round
+    if r is not rnd or token != table.turn_token:
+        return  # 이미 지난 차례의 타이머
     if (r and r.phase == "action" and r.turn == seat and not table.awaiting
             and len(r.players[seat].discards) == ndiscards):
         p = r.players[seat]
@@ -1036,24 +1062,38 @@ class NextView(discord.ui.View):
         self.add_item(Btn("🎌 종료", self._end, style=discord.ButtonStyle.danger))
 
     async def _next(self, interaction):
+        # 대국에 앉아 있는 사람만 (구경꾼이 진행시키면 안 되니까)
+        if self.table.seat_of(interaction.user.id) is None:
+            await interaction.response.send_message("이 대국의 플레이어가 아니에요.",
+                                                    ephemeral=True)
+            return
         if self.table.started:
             return
         await interaction.response.edit_message(content="다음 국 시작!", view=None)
         await start_round(self.table)
 
     async def _end(self, interaction):
+        # 종료는 대국을 끝내는 되돌릴 수 없는 동작이라 방장만
+        if self.table.host_id != interaction.user.id:
+            await interaction.response.send_message(
+                "대국 종료는 **방장만** 할 수 있어요.", ephemeral=True)
+            return
         await interaction.response.edit_message(view=None)
-        await end_game(self.table, "플레이어가 대국을 종료했습니다.")
+        await end_game(self.table, "방장이 대국을 종료했습니다.")
 
 
 async def end_game(table: Table, reason: str):
+    if tables.get(table.channel.id) is not table:
+        return  # 이미 종료된 대국 (버튼 중복 클릭 등)
+    table.cancel_timers()  # 남은 타이머가 끝난 판을 건드리지 않게
+    table.started = False
     r = table.round
     ranking = sorted(r.players, key=lambda p: -p.points)
     board = "\n".join(f"{i+1}위 **{p.name}** — {p.points}점"
                       for i, p in enumerate(ranking))
+    tables.pop(table.channel.id, None)
     await table.channel.send(f"🎌 **대국 종료**\n{reason}\n{board}")
     await table.leave_voice()
-    tables.pop(table.channel.id, None)
 
 
 # ---------------------------------------------------------------------------
