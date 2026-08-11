@@ -2,6 +2,9 @@
 Description=Riichi Mahjong Discord Bot
 After=network-online.target
 Wants=network-online.target
+# 재시작 횟수 제한을 없앰 — 이게 없으면 짧은 시간에 몇 번 죽었을 때 systemd 가
+# "start request repeated too quickly" 로 포기해서 봇이 영영 꺼진 채로 남아요.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -14,6 +17,9 @@ ExecStart=/opt/mahjong-bot/venv/bin/python bot.py
 Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=5
+# 램이 빠듯한 무료 VM 에서 dnf 같은 게 메모리를 밀어붙일 때, OOM 킬러가 봇 대신
+# 그쪽을 고르도록 우선순위를 낮춰둡니다.
+OOMScoreAdjust=-500
 # 토큰은 WorkingDirectory 안의 .env 를 bot.py 가 자동으로 읽습니다.
 # systemd 환경파일로 주고 싶으면 아래 주석을 해제하세요(형식 동일: KEY=VALUE):
 #EnvironmentFile=/opt/mahjong-bot/.env
