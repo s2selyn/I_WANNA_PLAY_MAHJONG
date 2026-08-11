@@ -251,6 +251,9 @@ class Table:
         self.lobby_msg: discord.Message | None = None
         self.board_msg: discord.Message | None = None  # live floor, edited in place
         self.control_msg: discord.Message | None = None  # 내 손패/콜 buttons (channel mode)
+        # 진행용 메시지(로비·보드·차례 알림·콜 안내…). 대국이 끝나면 지워서
+        # 결과만 남기고, 남은 버튼으로 끝난 판을 되살리는 일도 막아요.
+        self.transient: list[discord.Message] = []
         self.mode = "channel"  # table default: "channel" (mobile) or "dm" (PC)
         self.player_modes: dict[int, str] = {}  # user_id -> personal override
         self.host_id: int | None = None  # who opened the room (lobby controls)
@@ -375,6 +378,43 @@ class Table:
 tables: dict[int, Table] = {}
 
 
+def is_live(table: Table) -> bool:
+    """Is this still the channel's active game?
+
+    Buttons live on messages that outlast their game, and every view holds a
+    reference to the Table it was built for. Without this check, clicking an
+    old message resurrects a finished game — it keeps mutating that round and
+    editing its board long after the table was closed.
+    """
+    return tables.get(table.channel.id) is table
+
+
+async def send_transient(table: Table, *args, **kwargs) -> discord.Message:
+    """Send a progress message that gets cleaned up when the game ends."""
+    msg = await table.channel.send(*args, **kwargs)
+    table.transient.append(msg)
+    return msg
+
+
+async def clear_transient(table: Table) -> None:
+    """Delete the progress messages, leaving only the results in the channel."""
+    msgs, table.transient = table.transient, []
+    for m in (table.lobby_msg, table.control_msg, table.board_msg):
+        if m is not None and m not in msgs:
+            msgs.append(m)
+    table.lobby_msg = table.control_msg = table.board_msg = None
+    for m in msgs:
+        try:
+            await m.delete()
+        except discord.HTTPException:
+            pass  # 이미 지워졌거나 권한이 없어도 그냥 넘어가요
+
+
+async def dead_game(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message(
+        "이미 끝난 대국이에요. `!mj` 로 새로 시작해주세요.", ephemeral=True)
+
+
 # ---------------------------------------------------------------------------
 # public board rendering
 # ---------------------------------------------------------------------------
@@ -405,12 +445,12 @@ async def update_board(table: Table, note: str = "") -> None:
     """Send the shared floor once, then edit it in place on every change."""
     content = board_text(table, note)
     if table.board_msg is None:
-        table.board_msg = await table.channel.send(content)
+        table.board_msg = await send_transient(table, content)
     else:
         try:
             await table.board_msg.edit(content=content)
         except discord.HTTPException:
-            table.board_msg = await table.channel.send(content)
+            table.board_msg = await send_transient(table, content)
 
 
 def turn_content(table: Table, p: Player) -> str:
@@ -472,7 +512,8 @@ class TurnView(discord.ui.View):
 
     def _valid(self) -> bool:
         r = self.table.round
-        return r and r.phase == "action" and r.turn == self.seat
+        return (is_live(self.table) and r and r.phase == "action"
+                and r.turn == self.seat)
 
     def _make_discard(self, tile: Tile):
         async def cb(interaction: discord.Interaction):
@@ -585,6 +626,10 @@ class CallView(discord.ui.View):
 
     def _make(self, action, value=None):
         async def cb(interaction: discord.Interaction):
+            if not is_live(self.table):
+                await interaction.response.edit_message(
+                    content="이미 끝난 대국이에요.", view=disable_view(self))
+                return
             await interaction.response.edit_message(
                 content=f"선택: {action}", view=disable_view(self))
             await record_call(self.table, self.seat, action, value)
@@ -609,6 +654,8 @@ class ControlView(discord.ui.View):
     async def _leave_game(self, interaction: discord.Interaction):
         """Drop out mid-game — the AI takes over the seat so the hand continues."""
         t = self.table
+        if not is_live(t):
+            return await dead_game(interaction)
         if t.seat_of(interaction.user.id) is None:
             await interaction.response.send_message("이 게임의 플레이어가 아니에요.",
                                                     ephemeral=True)
@@ -622,6 +669,8 @@ class ControlView(discord.ui.View):
     async def _my_mode(self, interaction: discord.Interaction):
         """Toggle *this player's* hand delivery, independent of the table default."""
         t = self.table
+        if not is_live(t):
+            return await dead_game(interaction)
         uid = interaction.user.id
         if t.seat_of(uid) is None:
             await interaction.response.send_message("이 게임의 플레이어가 아니에요.",
@@ -641,6 +690,8 @@ class ControlView(discord.ui.View):
 
     async def _hand(self, interaction: discord.Interaction):
         t = self.table
+        if not is_live(t):
+            return await dead_game(interaction)
         seat = t.seat_of(interaction.user.id)
         if seat is None or not t.round:
             await interaction.response.send_message("이 게임의 플레이어가 아니에요.",
@@ -657,6 +708,8 @@ class ControlView(discord.ui.View):
 
     async def _call(self, interaction: discord.Interaction):
         t = self.table
+        if not is_live(t):
+            return await dead_game(interaction)
         seat = t.seat_of(interaction.user.id)
         if (seat is not None and t.awaiting and seat in t.call_eligible
                 and seat not in t.call_choices):
@@ -704,6 +757,15 @@ class LobbyView(discord.ui.View):
 
     def _is_host(self, interaction) -> bool:
         return self.table.host_id == interaction.user.id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Ignore clicks on a lobby message left over from a closed game."""
+        if is_live(self.table) and not self.table.started:
+            return True
+        await interaction.response.edit_message(
+            content="이미 닫힌 로비예요. `!mj` 로 새로 열어주세요.",
+            view=disable_view(self))
+        return False
 
     async def _deny(self, interaction):
         await interaction.response.send_message("방장만 할 수 있어요.", ephemeral=True)
@@ -785,7 +847,7 @@ class LobbyView(discord.ui.View):
         t.started = True
         await interaction.response.edit_message(content="🀄 대국 시작!",
                                                 view=disable_view(self))
-        await t.channel.send(seating_line(t))
+        await send_transient(t, seating_line(t))
         await start_round(t)
 
     async def _fill_start(self, interaction):
@@ -806,8 +868,12 @@ class LobbyView(discord.ui.View):
     async def _cancel(self, interaction):
         if not self._is_host(interaction):
             return await self._deny(interaction)
-        await self.table.leave_voice()
-        tables.pop(self.table.channel.id, None)
+        t = self.table
+        await t.leave_voice()
+        t.cancel_timers()
+        tables.pop(t.channel.id, None)
+        t.lobby_msg = None  # 이 메시지는 아래에서 안내문으로 바꿔 남겨둬요
+        await clear_transient(t)
         await interaction.response.edit_message(content="🛑 취소되었어요.",
                                                 view=disable_view(self))
 
@@ -863,7 +929,8 @@ async def start_round(table: Table):
     table.board_msg = None   # fresh floor for the new round
     await update_board(table)
     # 방식과 무관하게 항상 띄워요 — 각자 **⚙️ 내 방식** 으로 바꿀 수 있으니까요
-    table.control_msg = await table.channel.send(
+    table.control_msg = await send_transient(
+        table,
         "📱 아래 버튼으로 진행하세요 — 손패는 **나만 보여요**.\n"
         "PC라서 DM으로 받고 싶으면 **⚙️ 내 방식** 을 눌러 개인 설정을 바꾸세요.",
         view=ControlView(table))
@@ -890,7 +957,7 @@ async def send_turn(table: Table, seat: int):
             await table.channel.send(
                 f"⚠️ <@{p.user_id}> DM을 열 수 없어 채널 방식으로 진행할게요.")
     # channel mode: no DM push; nudge the player to tap 🎴 내 손패
-    await table.channel.send(f"▶️ <@{p.user_id}> 님 차례 — **🎴 내 손패** 를 누르세요")
+    await send_transient(table, f"▶️ <@{p.user_id}> 님 차례 — **🎴 내 손패** 를 누르세요")
 
 
 async def advance(table: Table):
@@ -1014,7 +1081,7 @@ async def _call_timer(table: Table):
 
 
 async def record_call(table: Table, seat: int, action: str, value):
-    if not table.awaiting or seat not in table.call_eligible:
+    if not is_live(table) or not table.awaiting or seat not in table.call_eligible:
         return
     table.call_choices[seat] = (action, value)
     # a ron resolves immediately; otherwise wait until everyone answered
@@ -1051,7 +1118,7 @@ async def resolve_calls(table: Table):
         s, a = ponkan[0]
         (r.call_pon if a == "pon" else r.call_kan)(s)
         play_sound(table, a)  # pon / kan
-        await table.channel.send(f"**{r.players[s].name}** {'퐁' if a == 'pon' else '깡'}!")
+        await send_transient(table, f"**{r.players[s].name}** {'퐁' if a == 'pon' else '깡'}!")
         if a == "kan":
             await update_board(table)
         await advance(table)
@@ -1061,7 +1128,7 @@ async def resolve_calls(table: Table):
         s, combo = chis[0]
         r.call_chi(s, list(combo))
         play_sound(table, "chi")
-        await table.channel.send(f"**{r.players[s].name}** 치!")
+        await send_transient(table, f"**{r.players[s].name}** 치!")
         await advance(table)
         return
     r.pass_calls()
@@ -1102,7 +1169,7 @@ async def finish_round(table: Table):
     if any(p.points < 0 for p in r.players):
         await end_game(table, "누군가 점수가 0 미만이 되어 종료합니다.")
         return
-    await table.channel.send("다음 국은 아래 **다음 국** 버튼으로!", view=NextView(table))
+    await send_transient(table, "다음 국은 아래 **다음 국** 버튼으로!", view=NextView(table))
 
 
 class NextView(discord.ui.View):
@@ -1113,6 +1180,8 @@ class NextView(discord.ui.View):
         self.add_item(Btn("🎌 종료", self._end, style=discord.ButtonStyle.danger))
 
     async def _next(self, interaction):
+        if not is_live(self.table):
+            return await dead_game(interaction)
         # 대국에 앉아 있는 사람만 (구경꾼이 진행시키면 안 되니까)
         if self.table.seat_of(interaction.user.id) is None:
             await interaction.response.send_message("이 대국의 플레이어가 아니에요.",
@@ -1124,6 +1193,8 @@ class NextView(discord.ui.View):
         await start_round(self.table)
 
     async def _end(self, interaction):
+        if not is_live(self.table):
+            return await dead_game(interaction)
         # 종료는 대국을 끝내는 되돌릴 수 없는 동작이라 방장만
         if self.table.host_id != interaction.user.id:
             await interaction.response.send_message(
@@ -1143,6 +1214,7 @@ async def end_game(table: Table, reason: str):
     board = "\n".join(f"{i+1}위 **{p.name}** — {p.points}점"
                       for i, p in enumerate(ranking))
     tables.pop(table.channel.id, None)
+    await clear_transient(table)  # 진행용 메시지·버튼을 치우고 결과만 남겨요
     await table.channel.send(f"🎌 **대국 종료**\n{reason}\n{board}")
     await table.leave_voice()
 
