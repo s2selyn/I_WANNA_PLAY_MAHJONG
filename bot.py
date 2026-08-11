@@ -950,7 +950,7 @@ async def mj_cmd(ctx, arg: str = None, *rest: str):
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} (id={bot.user.id})")
+    print(f"Logged in as {bot.user} (id={bot.user.id})", flush=True)
 
 
 def load_env_file() -> None:

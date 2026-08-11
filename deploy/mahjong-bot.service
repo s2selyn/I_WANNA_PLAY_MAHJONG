@@ -10,6 +10,8 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/opt/mahjong-bot
 ExecStart=/opt/mahjong-bot/venv/bin/python bot.py
+# 버퍼링을 끄지 않으면 print() 가 journald 에 한참 뒤에야 나타나요
+Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=5
 # 토큰은 WorkingDirectory 안의 .env 를 bot.py 가 자동으로 읽습니다.
