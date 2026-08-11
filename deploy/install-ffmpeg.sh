@@ -6,10 +6,15 @@
 #
 # 그냥 `dnf install ffmpeg-free` 를 하면 dnf 가 모든 저장소 메타데이터를 메모리에
 # 올리고 권장(weak) 의존성까지 끌어와서 OOM 으로 죽습니다. 여기서는
-#   1) 봇을 잠깐 멈춰 메모리를 확보하고
-#   2) 필요한 저장소만 켜고
-#   3) weak dependency 를 제외해서
-# 최대 사용량을 크게 낮춥니다. 끝나면 봇을 다시 켜요.
+#   1) 필요한 저장소만 켜고
+#   2) weak dependency 를 제외해서
+# 최대 사용량을 크게 낮춥니다.
+#
+# 환경변수:
+#   STOP_BOT=1   설치 동안 봇을 잠시 멈춰 메모리를 더 확보합니다(끝나면 자동 재시작).
+#                기본값은 **멈추지 않음** — 대국 중에도 돌릴 수 있게요.
+#                다만 램이 빠듯하면 OOM 킬러가 봇을 잡아갈 수도 있어요
+#                (systemd 가 곧바로 되살리지만 진행 중이던 판은 사라져요).
 #
 set -uo pipefail
 
@@ -25,10 +30,12 @@ if [ -e /swapfile ] && ! swapon --show | grep -q swapfile; then
 fi
 
 BOT_WAS_ACTIVE=no
-if systemctl is-active --quiet "$BOT_UNIT"; then
+if [ -n "${STOP_BOT:-}" ] && systemctl is-active --quiet "$BOT_UNIT"; then
   BOT_WAS_ACTIVE=yes
   echo "==> 설치 동안 봇을 잠시 멈춥니다 (메모리 확보)"
   sudo systemctl stop "$BOT_UNIT"
+else
+  echo "==> 봇은 계속 실행한 채로 설치합니다 (STOP_BOT=1 로 잠시 멈출 수 있어요)"
 fi
 
 restore_bot() {
