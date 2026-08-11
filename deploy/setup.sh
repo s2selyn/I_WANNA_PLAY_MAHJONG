@@ -25,17 +25,16 @@ elif command -v dnf >/dev/null 2>&1; then
   # Oracle Linux / RHEL / Rocky / Alma
   sudo dnf install -y git
   # 3.11 이 있으면 그걸 쓰고(권장), 없으면 배포판 기본 python3
-  if sudo dnf install -y python3.11 python3.11-pip >/dev/null 2>&1; then
+  if sudo dnf install -y python3.11 python3.11-pip; then
     PY=python3.11
   else
     sudo dnf install -y python3 python3-pip
   fi
-  # ffmpeg 는 기본 저장소에 없어서 EPEL 을 붙여요 (실패해도 계속 진행)
-  sudo dnf install -y oracle-epel-release-el9 >/dev/null 2>&1 \
-    || sudo dnf install -y epel-release >/dev/null 2>&1 || true
-  sudo dnf install -y ffmpeg-free >/dev/null 2>&1 \
-    || sudo dnf install -y ffmpeg >/dev/null 2>&1 \
-    || echo "!! ffmpeg 설치를 건너뛰었어요 — 효과음만 비활성화되고 게임은 정상 동작해요."
+  echo "==> ffmpeg 설치 시도 (효과음용 · 실패해도 계속 진행돼요)"
+  sudo dnf install -y oracle-epel-release-el9 \
+    || sudo dnf install -y epel-release || true
+  sudo dnf install -y ffmpeg-free || sudo dnf install -y ffmpeg \
+    || echo "!! ffmpeg 를 건너뛰었어요 — 효과음만 비활성화되고 게임은 정상 동작해요."
 else
   echo "!! 지원하지 않는 배포판이에요. python3 / git / ffmpeg 를 직접 설치한 뒤 다시 실행하세요."
   exit 1
