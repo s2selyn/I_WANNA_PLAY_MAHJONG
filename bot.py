@@ -35,8 +35,9 @@ from mahjong.render import (
 )
 from mahjong.tiles import Tile, kind_kr, kind_to_str
 
-CALL_TIMEOUT = 30   # seconds to decide on a call
-TURN_TIMEOUT = 120  # auto-discard if a human goes AFK
+CALL_TIMEOUT = 30    # seconds to decide on a call
+TURN_TIMEOUT = 120   # auto-discard if a human goes AFK
+LOBBY_TIMEOUT = 600  # close an unstarted lobby after this much inactivity
 
 # Optional sound effects: drop files like riichi.mp3 / ron.mp3 in sounds/.
 # Missing files (or missing voice deps) are silently skipped.
@@ -157,6 +158,10 @@ class Table:
         self.player_modes: dict[int, str] = {}  # user_id -> personal override
         self.host_id: int | None = None  # who opened the room (lobby controls)
 
+        # lobby expiry (unstarted rooms shouldn't linger forever)
+        self.lobby_deadline: float = 0.0
+        self.lobby_task: asyncio.Task | None = None
+
         # optional voice / sound effects
         self.voice: discord.VoiceClient | None = None
         self.sound_queue: list[str] = []
@@ -190,6 +195,13 @@ class Table:
             if p.user_id == user_id:
                 return p.seat
         return None
+
+    # lobby expiry --------------------------------------------------------
+    def touch_lobby(self) -> None:
+        """Push the lobby's expiry back; call on any lobby activity."""
+        self.lobby_deadline = asyncio.get_running_loop().time() + LOBBY_TIMEOUT
+        if self.lobby_task is None or self.lobby_task.done():
+            self.lobby_task = asyncio.create_task(_lobby_expiry(self))
 
     def mode_of(self, user_id: int | None) -> str:
         """Personal delivery mode, falling back to the table default."""
@@ -537,10 +549,12 @@ class LobbyView(discord.ui.View):
         if not self._is_host(interaction):
             return await self._deny(interaction)
         self.table.mode = "dm" if self.table.mode == "channel" else "channel"
+        self.table.touch_lobby()
         await interaction.response.edit_message(content=self._text(), view=self)
 
     async def _join(self, interaction):
         if self.table.add_human(interaction.user):
+            self.table.touch_lobby()
             await interaction.response.edit_message(content=self._text(), view=self)
         else:
             await interaction.response.send_message("참가할 수 없어요 (이미 참가/자리 참).",
@@ -550,6 +564,7 @@ class LobbyView(discord.ui.View):
         if not self._is_host(interaction):
             return await self._deny(interaction)
         if self.table.add_ai():
+            self.table.touch_lobby()
             await interaction.response.edit_message(content=self._text(), view=self)
         else:
             await interaction.response.send_message("자리가 없어요.", ephemeral=True)
@@ -623,6 +638,8 @@ async def start_round(table: Table):
 async def send_turn(table: Table, seat: int):
     p = table.round.players[seat]
     await update_board(table)  # move the ▶️ marker to this player
+    # 자리를 비워도 판이 멈추지 않도록, 방식과 무관하게 AFK 보호를 걸어둬요
+    asyncio.create_task(_turn_afk(table, seat, len(p.discards)))
     if table.mode_of(p.user_id) == "dm":
         try:
             dm = await dm_of(p.user_id)
@@ -634,7 +651,6 @@ async def send_turn(table: Table, seat: int):
                 f"⚠️ <@{p.user_id}> DM을 열 수 없어 채널 방식으로 진행할게요.")
     # channel mode: no DM push; nudge the player to tap 🎴 내 손패
     await table.channel.send(f"▶️ <@{p.user_id}> 님 차례 — **🎴 내 손패** 를 누르세요")
-    asyncio.create_task(_turn_afk(table, seat, len(p.discards)))
 
 
 async def advance(table: Table):
@@ -704,8 +720,32 @@ async def run_call_window(table: Table):
     table.call_task = asyncio.create_task(_call_timer(table))
 
 
+async def _lobby_expiry(table: Table):
+    """Close a lobby that never started, once it has been idle long enough."""
+    loop = asyncio.get_running_loop()
+    while True:
+        remaining = table.lobby_deadline - loop.time()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(remaining)  # deadline may have moved; loop re-checks
+
+    if table.started or tables.get(table.channel.id) is not table:
+        return  # 이미 시작했거나 닫힌 방
+    tables.pop(table.channel.id, None)
+    await table.leave_voice()
+    idle = (f"{LOBBY_TIMEOUT // 60}분" if LOBBY_TIMEOUT >= 60
+            else f"{LOBBY_TIMEOUT}초")
+    if table.lobby_msg is not None:
+        try:
+            await table.lobby_msg.edit(
+                content=f"⌛ {idle} 동안 조용해서 로비를 닫았어요. `!mj` 로 다시 열 수 있어요.",
+                view=None)
+        except discord.HTTPException:
+            pass
+
+
 async def _turn_afk(table: Table, seat: int, ndiscards: int):
-    """Channel-mode AFK guard: auto-discard if the player never acts."""
+    """AFK guard: auto-discard if the player never acts (both modes)."""
     await asyncio.sleep(TURN_TIMEOUT)
     r = table.round
     if (r and r.phase == "action" and r.turn == seat and not table.awaiting
@@ -1009,6 +1049,7 @@ async def mj_cmd(ctx, arg: str = None, *rest: str):
     await t.join_voice(ctx.author)
     view = LobbyView(t)
     t.lobby_msg = await ctx.send(view._text(), view=view)
+    t.touch_lobby()  # 아무도 안 들어오면 자동으로 닫혀요
 
 
 @bot.event
