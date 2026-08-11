@@ -52,19 +52,28 @@ https://cloud.oracle.com 에서 **Start for free** → 가입.
 
 ## 2. SSH 접속
 
-```bash
-# 다운받은 키 권한 (한 번만) — 맥/리눅스
-chmod 600 ~/Downloads/ssh-key-*.key
+Ubuntu 이미지의 기본 유저는 **`ubuntu`** 예요.
 
-# Ubuntu 이미지의 기본 유저는 ubuntu
+**맥 / 리눅스**
+```bash
+chmod 600 ~/Downloads/ssh-key-*.key      # 키 권한 조이기 (한 번만)
 ssh -i ~/Downloads/ssh-key-*.key ubuntu@<Public-IP>
+```
+
+**윈도우 (PowerShell)** — `chmod` 는 리눅스 명령이라 **없어요. 그 줄은 건너뛰세요.**
+```powershell
+ssh -i C:\Users\<사용자명>\Downloads\ssh-key-2026-01-01.key ubuntu@<Public-IP>
 ```
 
 처음 접속하면 `Are you sure you want to continue connecting?` → **yes** 입력.
 
-- **윈도우**: PowerShell 에서 위 명령 그대로 (또는 PuTTY)
 - **폰**: **Termius** 같은 SSH 앱에 키 파일 넣어서 접속
-- ❗ `Permission denied` 면 → 키 경로/권한 확인, 유저명이 `ubuntu` 인지 확인
+- ❗ 윈도우에서 `UNPROTECTED PRIVATE KEY FILE` 이 뜨면 권한을 좁혀주세요:
+  ```powershell
+  icacls "<키경로>" /inheritance:r
+  icacls "<키경로>" /grant:r "$env:USERNAME:(R)"
+  ```
+- ❗ `Permission denied` 면 → 키 경로/파일명 확인, 유저명이 `ubuntu` 인지 확인
   (Oracle Linux 이미지를 골랐다면 `opc`)
 
 ---
