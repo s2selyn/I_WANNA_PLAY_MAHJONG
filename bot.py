@@ -153,7 +153,8 @@ class Table:
         self.lobby_msg: discord.Message | None = None
         self.board_msg: discord.Message | None = None  # live floor, edited in place
         self.control_msg: discord.Message | None = None  # 내 손패/콜 buttons (channel mode)
-        self.mode = "channel"  # "channel" (mobile, ephemeral) or "dm"
+        self.mode = "channel"  # table default: "channel" (mobile) or "dm" (PC)
+        self.player_modes: dict[int, str] = {}  # user_id -> personal override
         self.host_id: int | None = None  # who opened the room (lobby controls)
 
         # optional voice / sound effects
@@ -189,6 +190,12 @@ class Table:
             if p.user_id == user_id:
                 return p.seat
         return None
+
+    def mode_of(self, user_id: int | None) -> str:
+        """Personal delivery mode, falling back to the table default."""
+        if user_id is None:
+            return self.mode
+        return self.player_modes.get(user_id, self.mode)
 
     def round_wind_name(self) -> str:
         return kind_kr([27, 28, 29, 30][self.round_wind_idx])
@@ -447,6 +454,25 @@ class ControlView(discord.ui.View):
         self.table = table
         self.add_item(Btn("🎴 내 손패", self._hand, style=discord.ButtonStyle.primary))
         self.add_item(Btn("🔔 콜", self._call, style=discord.ButtonStyle.secondary))
+        self.add_item(Btn("⚙️ 내 방식", self._my_mode, style=discord.ButtonStyle.secondary))
+
+    async def _my_mode(self, interaction: discord.Interaction):
+        """Toggle *this player's* hand delivery, independent of the table default."""
+        t = self.table
+        uid = interaction.user.id
+        if t.seat_of(uid) is None:
+            await interaction.response.send_message("이 게임의 플레이어가 아니에요.",
+                                                    ephemeral=True)
+            return
+        new = "dm" if t.mode_of(uid) == "channel" else "channel"
+        t.player_modes[uid] = new
+        if new == "dm":
+            msg = ("💻 **DM 방식**으로 바꿨어요 — 이제 손패가 DM으로 자동으로 와요.\n"
+                   "_DM이 막혀 있으면 자동으로 채널 방식으로 돌아가요._")
+        else:
+            msg = ("📱 **채널 방식**으로 바꿨어요 — **🎴 내 손패** 버튼으로 진행하세요.\n"
+                   "_이 설정은 나에게만 적용돼요._")
+        await interaction.response.send_message(msg, ephemeral=True)
 
     async def _hand(self, interaction: discord.Interaction):
         t = self.table
@@ -498,7 +524,7 @@ class LobbyView(discord.ui.View):
         mode = ("📱 채널(모바일: 나만 보이는 손패)" if t.mode == "channel"
                 else "💻 DM(PC: 손패 자동 전송)")
         return (f"🀄 **{t.size}인 리치마작 로비** ({len(t.seats)}/{t.size}){host}\n{names}\n\n"
-                f"손패 방식: **{mode}**\n"
+                f"손패 방식(기본값): **{mode}**　_게임 중 **⚙️ 내 방식** 으로 각자 변경 가능_\n"
                 f"누구나 **참가** 가능 · 시작/취소/AI/방식은 **방장 전용**")
 
     def _is_host(self, interaction) -> bool:
@@ -586,27 +612,29 @@ async def start_round(table: Table):
     table.started = True
     table.board_msg = None   # fresh floor for the new round
     await update_board(table)
-    if table.mode == "channel":
-        table.control_msg = await table.channel.send(
-            "📱 아래 버튼으로 진행하세요 — 손패는 **나만 보여요**.",
-            view=ControlView(table))
+    # 방식과 무관하게 항상 띄워요 — 각자 **⚙️ 내 방식** 으로 바꿀 수 있으니까요
+    table.control_msg = await table.channel.send(
+        "📱 아래 버튼으로 진행하세요 — 손패는 **나만 보여요**.\n"
+        "PC라서 DM으로 받고 싶으면 **⚙️ 내 방식** 을 눌러 개인 설정을 바꾸세요.",
+        view=ControlView(table))
     await advance(table)
 
 
 async def send_turn(table: Table, seat: int):
     p = table.round.players[seat]
     await update_board(table)  # move the ▶️ marker to this player
-    if table.mode == "channel":
-        # mobile: no DM push; nudge the player to tap 🎴 내 손패
-        await table.channel.send(f"▶️ <@{p.user_id}> 님 차례 — **🎴 내 손패** 를 누르세요")
-        asyncio.create_task(_turn_afk(table, seat, len(p.discards)))
-        return
-    try:
-        dm = await dm_of(p.user_id)
-        await dm.send(content=turn_content(table, p), view=TurnView(table, seat))
-    except discord.Forbidden:
-        await table.channel.send(
-            f"⚠️ <@{p.user_id}> DM을 열 수 없어요. (개인정보 보호 → 서버 멤버 DM 허용)")
+    if table.mode_of(p.user_id) == "dm":
+        try:
+            dm = await dm_of(p.user_id)
+            await dm.send(content=turn_content(table, p), view=TurnView(table, seat))
+            return
+        except discord.Forbidden:
+            # DM 이 막혀 있으면 채널 방식으로 자연스럽게 넘어가요
+            await table.channel.send(
+                f"⚠️ <@{p.user_id}> DM을 열 수 없어 채널 방식으로 진행할게요.")
+    # channel mode: no DM push; nudge the player to tap 🎴 내 손패
+    await table.channel.send(f"▶️ <@{p.user_id}> 님 차례 — **🎴 내 손패** 를 누르세요")
+    asyncio.create_task(_turn_afk(table, seat, len(p.discards)))
 
 
 async def advance(table: Table):
@@ -647,20 +675,25 @@ async def run_call_window(table: Table):
     table.call_messages = {}
     table.call_eligible = {s for s in r.pending_calls if not r.players[s].is_ai}
 
-    if table.mode == "dm":
-        for s in table.call_eligible:
-            p = r.players[s]
-            try:
-                dm = await dm_of(p.user_id)
-                msg = await dm.send(
-                    content=f"❗ **{tile_glyph(tile)}** — 콜 하시겠어요? ({CALL_TIMEOUT}s)",
-                    view=CallView(table, s, r.pending_calls[s]))
-                table.call_messages[s] = msg
-            except discord.Forbidden:
-                pass
+    # DM 방식인 사람에게만 콜 창을 밀어주고, 채널 방식인 사람은 🔔 콜 버튼을 눌러요
+    dm_seats = [s for s in table.call_eligible
+                if table.mode_of(r.players[s].user_id) == "dm"]
+    for s in dm_seats:
+        p = r.players[s]
+        try:
+            dm = await dm_of(p.user_id)
+            msg = await dm.send(
+                content=f"❗ **{tile_glyph(tile)}** — 콜 하시겠어요? ({CALL_TIMEOUT}s)",
+                view=CallView(table, s, r.pending_calls[s]))
+            table.call_messages[s] = msg
+        except discord.Forbidden:
+            pass
+
+    if len(dm_seats) == len(table.call_eligible):
         where = f"(DM에서 {CALL_TIMEOUT}s 안에 선택)"
+    elif dm_seats:
+        where = f"(DM 또는 **🔔 콜** 버튼으로 {CALL_TIMEOUT}s 안에 선택)"
     else:
-        # mobile: players tap the 🔔 콜 button for a private (ephemeral) prompt
         where = f"(**🔔 콜** 버튼을 {CALL_TIMEOUT}s 안에 누르세요)"
 
     await table.channel.send(
