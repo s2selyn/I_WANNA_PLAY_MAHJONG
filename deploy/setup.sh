@@ -9,7 +9,9 @@
 #
 # 환경변수:
 #   BRANCH=main       배포할 브랜치
-#   SKIP_FFMPEG=1     효과음용 ffmpeg 설치를 건너뜁니다 (램 작은 VM 에서 유용)
+#   WITH_FFMPEG=1     음성 효과음용 ffmpeg 도 설치합니다.
+#                     기본은 설치하지 않아요 — 램/CPU 가 작은 무료 VM 에서는
+#                     EPEL 메타데이터 때문에 아주 오래 걸리거든요.
 #
 # 설계 원칙: **봇이 먼저 돌아가게** 하고, 무거운 선택 기능(ffmpeg)은 맨 마지막에.
 # 이미 있는 건 절대 다시 설치하지 않습니다 (dnf/apt 호출 최소화).
@@ -111,10 +113,8 @@ sudo systemctl enable mahjong-bot
 # 여기서 실패하거나 오래 걸려도 봇은 이미 설치가 끝난 상태입니다.
 if have ffmpeg; then
   echo "==> ffmpeg 이미 있음 — 효과음 사용 가능"
-elif [ -n "${SKIP_FFMPEG:-}" ]; then
-  echo "==> SKIP_FFMPEG 지정 — 효과음 없이 진행"
-else
-  echo "==> (선택) ffmpeg 설치 시도 — 음성 효과음용, 오래 걸리면 Ctrl+C 로 건너뛰어도 됩니다"
+elif [ -n "${WITH_FFMPEG:-}" ]; then
+  echo "==> ffmpeg 설치 시도 — 오래 걸리면 Ctrl+C 로 건너뛰어도 됩니다"
   if [ "$PKG" = apt ]; then
     sudo apt-get install -y ffmpeg || echo "!! ffmpeg 건너뜀"
   else
@@ -122,6 +122,8 @@ else
     pkg_install ffmpeg-free || pkg_install ffmpeg \
       || echo "!! ffmpeg 건너뜀 — 효과음만 비활성화되고 게임은 정상 동작해요."
   fi
+else
+  echo "==> ffmpeg 없음 — 효과음 없이 진행 (원하면 나중에 WITH_FFMPEG=1 로 설치)"
 fi
 
 cat <<EOF
