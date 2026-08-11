@@ -89,8 +89,9 @@ if ! "$PY" -m venv "$DEST/venv" 2>/dev/null; then
   pkg_install "${PY}-devel" "${PY}-pip" || pkg_install python3-venv python3-pip || true
   "$PY" -m venv "$DEST/venv"
 fi
-"$DEST/venv/bin/pip" install --upgrade pip
-"$DEST/venv/bin/pip" install -r "$DEST/requirements.txt"
+# --no-cache-dir: 램/디스크가 빠듯한 VM 에서 pip 캐시가 OOM 을 유발하는 걸 막아요
+"$DEST/venv/bin/pip" install --no-cache-dir --upgrade pip
+"$DEST/venv/bin/pip" install --no-cache-dir -r "$DEST/requirements.txt"
 
 # --- 4. .env ----------------------------------------------------------------
 echo "==> .env 준비"
