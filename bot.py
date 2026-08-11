@@ -23,6 +23,7 @@ import random
 import discord
 from discord.ext import commands
 
+from mahjong import render as render_module
 from mahjong.game import GameConfig, Round
 from mahjong.player import Player
 from mahjong.render import (
@@ -57,6 +58,44 @@ SOUNDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")
 SOUND_EXTS = (".mp3", ".ogg", ".wav", ".m4a")
 SOUND_NAMES = ("riichi", "ron", "tsumo", "pon", "chi", "kan")
 MAX_SOUND_BYTES = 1024 * 1024  # 1 MB — effects should be short
+
+
+# --- custom tile emoji ------------------------------------------------------
+# Uploaded as *application* emoji, so they work in every server the bot joins
+# without taking up that server's emoji slots. Names look like "mj_m1"/"mj_z3".
+TILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "assets", "tiles")
+EMOJI_PREFIX = "mj_"
+
+
+def tile_asset_name(kind: int, aka: bool) -> str:
+    """Asset/emoji stem for a tile kind: m1..m9, p1.., s1.., z1..z7, m0=red 5."""
+    if kind >= 27:
+        return f"z{kind - 26}"
+    suit = "mps"[kind // 9]
+    num = kind % 9 + 1
+    return f"{suit}0" if aka else f"{suit}{num}"
+
+
+async def load_tile_emoji() -> int:
+    """Point the renderer at whatever tile emoji this application already has."""
+    try:
+        emojis = await bot.fetch_application_emojis()
+    except Exception as exc:
+        print(f"[emoji] fetch failed: {exc}", flush=True)
+        return 0
+    by_name = {e.name: str(e) for e in emojis if e.name.startswith(EMOJI_PREFIX)}
+    mapping = {}
+    for kind in range(34):
+        for aka in (False, True):
+            if aka and kind not in (4, 13, 22):  # 적5는 만·통·삭에만 있어요
+                continue
+            got = by_name.get(EMOJI_PREFIX + tile_asset_name(kind, aka))
+            if got:
+                mapping[(kind, aka)] = got
+    render_module.GLYPH_OVERRIDE.clear()
+    render_module.GLYPH_OVERRIDE.update(mapping)
+    return len(mapping)
 
 
 def load_prefs() -> dict[int, str]:
@@ -162,6 +201,19 @@ def disable_view(view: discord.ui.View) -> discord.ui.View:
     for child in view.children:
         child.disabled = True
     return view
+
+
+def tile_btn_kwargs(t: Tile) -> dict:
+    """Button face for a tile.
+
+    A custom emoji has to go in the button's ``emoji`` field — Discord will not
+    render ``<:name:id>`` inside label text — so split it out when we have one
+    and fall back to putting the Unicode glyph in the label.
+    """
+    glyph = tile_button_emoji(t)
+    if glyph.startswith("<"):
+        return {"label": tile_label(t), "emoji": discord.PartialEmoji.from_str(glyph)}
+    return {"label": f"{glyph} {tile_label(t)}"}
 
 
 async def dm_of(user_id: int) -> discord.DMChannel:
@@ -409,8 +461,7 @@ class TurnView(discord.ui.View):
                     seen.add(key)
                     choices.append(t)
         for t in choices:
-            self.add_item(Btn(f"{tile_button_emoji(t)} {tile_label(t)}",
-                              self._make_discard(t)))
+            self.add_item(Btn(cb=self._make_discard(t), **tile_btn_kwargs(t)))
 
         if r.can_tsumo():
             self.add_item(Btn("🀄 쯔모", self._tsumo, style=discord.ButtonStyle.success))
@@ -512,7 +563,7 @@ class ChoiceView(discord.ui.View):
             if key in seen:
                 continue
             seen.add(key)
-            self.add_item(Btn(f"{tile_button_emoji(t)} {tile_label(t)}", cb_factory(t)))
+            self.add_item(Btn(cb=cb_factory(t), **tile_btn_kwargs(t)))
 
 
 class CallView(discord.ui.View):
@@ -1198,6 +1249,86 @@ async def sound_cmd(ctx, args: list[str]):
 
 
 # ---------------------------------------------------------------------------
+# tile emoji management (`!mj emoji ...`) — bot owner only
+# ---------------------------------------------------------------------------
+async def emoji_cmd(ctx, args: list[str]):
+    action = args[0] if args else "status"
+
+    if action in ("status", "상태"):
+        n = len(render_module.GLYPH_OVERRIDE)
+        if n:
+            sample = " ".join(list(render_module.GLYPH_OVERRIDE.values())[:9])
+            await ctx.send(f"🀄 타일 이모지 **{n}개** 사용 중이에요.\n{sample}")
+        else:
+            await ctx.send("타일 이모지가 없어서 기본 유니코드 문자를 쓰고 있어요.\n"
+                           "봇 소유자가 `!mj emoji install` 을 실행하면 예쁜 패로 바뀌어요.")
+        return
+
+    if not await bot.is_owner(ctx.author):
+        await ctx.send("이 명령은 **봇 소유자**만 쓸 수 있어요.")
+        return
+
+    if action in ("install", "설치", "업로드"):
+        if not os.path.isdir(TILES_DIR):
+            await ctx.send(f"타일 이미지 폴더가 없어요: `{TILES_DIR}`")
+            return
+        try:
+            existing = {e.name for e in await bot.fetch_application_emojis()}
+        except Exception as exc:
+            await ctx.send(f"이모지 목록을 못 읽었어요: `{exc}`")
+            return
+
+        msg = await ctx.send("🀄 타일 이모지를 올리는 중… (37개, 1분쯤 걸려요)")
+        added = skipped = failed = 0
+        for kind in range(34):
+            for aka in (False, True):
+                if aka and kind not in (4, 13, 22):
+                    continue
+                stem = tile_asset_name(kind, aka)
+                name = EMOJI_PREFIX + stem
+                if name in existing:
+                    skipped += 1
+                    continue
+                path = os.path.join(TILES_DIR, f"{stem}.png")
+                if not os.path.exists(path):
+                    failed += 1
+                    continue
+                try:
+                    with open(path, "rb") as f:
+                        await bot.create_application_emoji(name=name, image=f.read())
+                    added += 1
+                except Exception as exc:
+                    print(f"[emoji] upload {name} failed: {exc}", flush=True)
+                    failed += 1
+        n = await load_tile_emoji()
+        await msg.edit(content=(
+            f"✅ 완료 — 새로 올림 **{added}** · 이미 있음 **{skipped}**"
+            + (f" · 실패 **{failed}**" if failed else "")
+            + f"\n이제 **{n}개**의 타일 이모지를 씁니다. 모든 서버에서 바로 적용돼요!"))
+        return
+
+    if action in ("remove", "삭제", "제거"):
+        try:
+            emojis = await bot.fetch_application_emojis()
+        except Exception as exc:
+            await ctx.send(f"이모지 목록을 못 읽었어요: `{exc}`")
+            return
+        removed = 0
+        for e in emojis:
+            if e.name.startswith(EMOJI_PREFIX):
+                try:
+                    await e.delete()
+                    removed += 1
+                except Exception:
+                    pass
+        render_module.GLYPH_OVERRIDE.clear()
+        await ctx.send(f"🗑 타일 이모지 **{removed}개**를 지웠어요. 유니코드 문자로 돌아갑니다.")
+        return
+
+    await ctx.send("사용법: `!mj emoji status` · `!mj emoji install` · `!mj emoji remove`")
+
+
+# ---------------------------------------------------------------------------
 # entry command
 # ---------------------------------------------------------------------------
 GREETINGS = ("안녕", "안녕하세요", "안뇽", "하이", "ㅎㅇ", "hi", "hello", "헬로",
@@ -1235,6 +1366,9 @@ async def mj_cmd(ctx, arg: str = None, *rest: str):
     if arg in ("sound", "효과음"):
         await sound_cmd(ctx, list(rest))
         return
+    if arg in ("emoji", "이모지"):
+        await emoji_cmd(ctx, list(rest))
+        return
     if ctx.guild is None:
         # DM 에서는 로비를 열 수 없어요 — 여러 명이 참가해야 하고, 나만 보이는
         # 손패·음성 효과음 같은 기능이 서버 채널을 전제로 하거든요.
@@ -1266,6 +1400,9 @@ async def mj_cmd(ctx, arg: str = None, *rest: str):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (id={bot.user.id})", flush=True)
+    n = await load_tile_emoji()
+    print(f"Tile emoji loaded: {n}"
+          + ("" if n else "  (run `!mj emoji install` for tile images)"), flush=True)
 
 
 def load_env_file() -> None:

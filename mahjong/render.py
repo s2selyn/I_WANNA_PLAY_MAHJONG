@@ -20,7 +20,16 @@ _UNICODE = {
 }
 
 
+# Optional prettier glyphs, keyed by (kind, aka). The Discord layer fills this
+# in with custom tile emoji when they are available; empty means "use Unicode".
+# Kept as a plain dict so this module stays free of any Discord dependency.
+GLYPH_OVERRIDE: dict[tuple[int, bool], str] = {}
+
+
 def tile_glyph(t: Tile) -> str:
+    custom = GLYPH_OVERRIDE.get((t.kind, bool(t.aka)))
+    if custom:
+        return custom
     g = _UNICODE[t.kind]
     return f"{g}(적)" if t.aka else g
 
@@ -35,7 +44,7 @@ def tile_label(t: Tile) -> str:
 
 
 def tile_button_emoji(t: Tile) -> str:
-    return _UNICODE[t.kind]
+    return GLYPH_OVERRIDE.get((t.kind, bool(t.aka))) or _UNICODE[t.kind]
 
 
 def hand_line(tiles: list[Tile], drawn: Tile | None = None) -> str:
