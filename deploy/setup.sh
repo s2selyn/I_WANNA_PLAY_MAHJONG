@@ -25,6 +25,18 @@ TARBALL="https://codeload.github.com/s2selyn/I_WANNA_PLAY_MAHJONG/tar.gz/refs/he
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# 이 스크립트는 실행 도중 $DEST 를 통째로 갱신하는데, 그 안에는 자기 자신도 들어
+# 있습니다. bash 는 스크립트를 읽어가며 실행하기 때문에 실행 중 파일이 바뀌면
+# 엉뚱한 줄을 읽을 수 있어요. $DEST 안에서 실행됐다면 임시 복사본으로 재실행합니다.
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+case "${MJ_REEXEC:-}${SELF}" in
+  "$DEST"/*)
+    TMP_SELF="$(mktemp /tmp/mj-setup.XXXXXX.sh)"
+    cp "$SELF" "$TMP_SELF"
+    MJ_REEXEC=1 exec bash "$TMP_SELF" "$@"
+    ;;
+esac
+
 if have apt-get; then PKG=apt
 elif have dnf;   then PKG=dnf
 elif have yum;   then PKG=yum
