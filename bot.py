@@ -916,8 +916,28 @@ async def sound_cmd(ctx, args: list[str]):
 # ---------------------------------------------------------------------------
 # entry command
 # ---------------------------------------------------------------------------
+GREETINGS = ("안녕", "안녕하세요", "안뇽", "하이", "ㅎㅇ", "hi", "hello", "헬로",
+             "인사", "여어", "반가워", "왔니", "야")
+
+HELLOS = (
+    "🀄 안녕하세요! 마작 봇이에요. 오늘도 즐거운 대국 되세요!",
+    "🀄 안녕하세요~ 부르셨나요? 패는 언제나 준비돼 있어요!",
+    "🀄 반갑습니다! 한 판 하실래요? 자리는 넉넉해요.",
+    "🀄 안녕하세요! 오늘은 리치 한 방 크게 가시죠 🎏",
+    "🀄 어서 오세요! 쯔모 잘 붙는 날이길 바랄게요.",
+)
+
+MENU = ("· `!mj` — 4인 대국\n"
+        "· `!mj 3` — 3인(산마)\n"
+        "· `!mj sound` — 효과음 설정\n"
+        "· `!mj help` — 자세한 도움말")
+
+
 @bot.command(name="mj")
 async def mj_cmd(ctx, arg: str = None, *rest: str):
+    if arg and arg.lower() in GREETINGS:
+        await ctx.send(f"{random.choice(HELLOS)}\n{MENU}")
+        return
     if arg in ("help", "도움", "도움말"):
         await ctx.send(
             "🀄 **리치마작 봇**\n"
@@ -933,7 +953,9 @@ async def mj_cmd(ctx, arg: str = None, *rest: str):
         return
     size = 3 if arg == "3" else 4
     if arg not in (None, "3", "4"):
-        await ctx.send("사용법: `!mj` (4인) · `!mj 3` (3인) · `!mj sound` · `!mj help`")
+        # 모르는 말이어도 무뚝뚝하게 굴지 않기 — 인사부터 하고 메뉴를 안내해요
+        await ctx.send(f"{random.choice(HELLOS)}\n"
+                       f"음… `{arg}` 라는 말은 제가 몰라요 😅 이런 걸 할 수 있어요:\n{MENU}")
         return
     if ctx.channel.id in tables:
         await ctx.send("이미 이 채널에 게임이 있어요.")
