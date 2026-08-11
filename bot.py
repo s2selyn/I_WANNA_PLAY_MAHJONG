@@ -35,9 +35,9 @@ from mahjong.render import (
 )
 from mahjong.tiles import Tile, kind_kr, kind_to_str
 
-CALL_TIMEOUT = 30    # seconds to decide on a call
-TURN_TIMEOUT = 120   # auto-discard if a human goes AFK
-LOBBY_TIMEOUT = 600  # close an unstarted lobby after this much inactivity
+CALL_TIMEOUT = 30     # seconds to decide on a call
+TURN_TIMEOUT = 60     # auto-discard if a human goes AFK
+LOBBY_TIMEOUT = 3600  # close an unstarted lobby after this much inactivity
 
 # Optional sound effects: drop files like riichi.mp3 / ron.mp3 in sounds/.
 # Missing files (or missing voice deps) are silently skipped.
@@ -188,6 +188,23 @@ class Table:
             return False
         self._ai += 1
         self.seats.append(Player(seat=len(self.seats), name=f"AI-{self._ai}", is_ai=True))
+        return True
+
+    def remove_human(self, user_id: int) -> bool:
+        """Leave an unstarted lobby. Seats are renumbered to stay 0..n-1."""
+        if self.started:
+            return False
+        before = len(self.seats)
+        self.seats = [p for p in self.seats if p.user_id != user_id]
+        if len(self.seats) == before:
+            return False
+        for i, p in enumerate(self.seats):  # seat_wind 는 국 시작 때 다시 정해져요
+            p.seat = i
+        self.player_modes.pop(user_id, None)
+        if user_id == self.host_id:
+            # 방장이 나가면 남은 사람 중 첫 사람에게 넘겨요
+            nxt = next((p for p in self.seats if not p.is_ai), None)
+            self.host_id = nxt.user_id if nxt else None
         return True
 
     def seat_of(self, user_id: int) -> int | None:
@@ -521,6 +538,7 @@ class LobbyView(discord.ui.View):
         super().__init__(timeout=None)
         self.table = table
         self.add_item(Btn("참가", self._join, style=discord.ButtonStyle.success))
+        self.add_item(Btn("나가기", self._leave, style=discord.ButtonStyle.secondary))
         self.add_item(Btn("AI 추가", self._ai, style=discord.ButtonStyle.secondary))
         self.add_item(Btn("손패 방식 전환", self._mode, style=discord.ButtonStyle.secondary))
         self.add_item(Btn("시작", self._start, style=discord.ButtonStyle.primary))
@@ -537,7 +555,7 @@ class LobbyView(discord.ui.View):
                 else "💻 DM(PC: 손패 자동 전송)")
         return (f"🀄 **{t.size}인 리치마작 로비** ({len(t.seats)}/{t.size}){host}\n{names}\n\n"
                 f"손패 방식(기본값): **{mode}**　_게임 중 **⚙️ 내 방식** 으로 각자 변경 가능_\n"
-                f"누구나 **참가** 가능 · 시작/취소/AI/방식은 **방장 전용**")
+                f"**참가**·**나가기**는 누구나 · 시작/취소/AI/방식은 **방장 전용** 👑")
 
     def _is_host(self, interaction) -> bool:
         return self.table.host_id == interaction.user.id
@@ -559,6 +577,23 @@ class LobbyView(discord.ui.View):
         else:
             await interaction.response.send_message("참가할 수 없어요 (이미 참가/자리 참).",
                                                     ephemeral=True)
+
+    async def _leave(self, interaction):
+        """Anyone may leave their own seat before the game starts."""
+        t = self.table
+        if not t.remove_human(interaction.user.id):
+            await interaction.response.send_message("참가한 상태가 아니에요.", ephemeral=True)
+            return
+        if not any(not p.is_ai for p in t.seats):
+            # 사람이 아무도 안 남으면 방을 닫아요
+            await t.leave_voice()
+            tables.pop(t.channel.id, None)
+            await interaction.response.edit_message(
+                content="🛑 모두 나가서 로비를 닫았어요. `!mj` 로 다시 열 수 있어요.",
+                view=disable_view(self))
+            return
+        t.touch_lobby()
+        await interaction.response.edit_message(content=self._text(), view=self)
 
     async def _ai(self, interaction):
         if not self._is_host(interaction):
