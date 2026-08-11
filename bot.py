@@ -562,8 +562,9 @@ class LobbyView(discord.ui.View):
         self.table = table
         self.add_item(Btn("참가", self._join, style=discord.ButtonStyle.success))
         self.add_item(Btn("나가기", self._leave, style=discord.ButtonStyle.secondary))
+        self.add_item(Btn("⚙️ 내 방식", self._my_mode, style=discord.ButtonStyle.secondary))
         self.add_item(Btn("AI 추가", self._ai, style=discord.ButtonStyle.secondary))
-        self.add_item(Btn("손패 방식 전환", self._mode, style=discord.ButtonStyle.secondary))
+        self.add_item(Btn("기본 방식 전환", self._mode, style=discord.ButtonStyle.secondary))
         self.add_item(Btn("시작", self._start, style=discord.ButtonStyle.primary))
         self.add_item(Btn("빈자리 AI 채우고 시작", self._fill_start,
                           style=discord.ButtonStyle.primary))
@@ -572,13 +573,21 @@ class LobbyView(discord.ui.View):
     def _text(self) -> str:
         t = self.table
         host = f"　(방장: <@{t.host_id}>)" if t.host_id else ""
-        names = "\n".join(f"　{i+1}. {p.name}{' 🤖' if p.is_ai else ''}"
-                          for i, p in enumerate(t.seats)) or "　(아직 없음)"
+        def tag(p):
+            if p.is_ai:
+                return " 🤖"
+            # 기본값과 다르게 개인 설정을 한 사람만 표시해요
+            if p.user_id in t.player_modes:
+                return " 📱" if t.player_modes[p.user_id] == "channel" else " 💻"
+            return ""
+
+        names = "\n".join(f"　{i+1}. {p.name}{tag(p)}" for i, p in enumerate(t.seats)) \
+            or "　(아직 없음)"
         mode = ("📱 채널(모바일: 나만 보이는 손패)" if t.mode == "channel"
                 else "💻 DM(PC: 손패 자동 전송)")
         return (f"🀄 **{t.size}인 리치마작 로비** ({len(t.seats)}/{t.size}){host}\n{names}\n\n"
-                f"손패 방식(기본값): **{mode}**　_게임 중 **⚙️ 내 방식** 으로 각자 변경 가능_\n"
-                f"**참가**·**나가기**는 누구나 · 시작/취소/AI/방식은 **방장 전용** 👑")
+                f"손패 방식(기본값): **{mode}**　_**⚙️ 내 방식** 으로 각자 따로 정할 수 있어요_\n"
+                f"**참가**·**나가기**·**⚙️ 내 방식**은 누구나 · 시작/취소/AI/기본방식은 **방장 전용** 👑")
 
     def _is_host(self, interaction) -> bool:
         return self.table.host_id == interaction.user.id
@@ -592,6 +601,25 @@ class LobbyView(discord.ui.View):
         self.table.mode = "dm" if self.table.mode == "channel" else "channel"
         self.table.touch_lobby()
         await interaction.response.edit_message(content=self._text(), view=self)
+
+    async def _my_mode(self, interaction):
+        """Pick your own delivery mode before the game starts (anyone)."""
+        t = self.table
+        uid = interaction.user.id
+        if t.seat_of(uid) is None:
+            await interaction.response.send_message(
+                "먼저 **참가** 를 눌러 자리에 앉아주세요.", ephemeral=True)
+            return
+        new = "dm" if t.mode_of(uid) == "channel" else "channel"
+        t.player_modes[uid] = new
+        t.touch_lobby()
+        if new == "dm":
+            msg = ("💻 **DM 방식**으로 설정했어요 — 시작하면 손패가 DM으로 자동으로 와요.\n"
+                   "_DM이 막혀 있으면 자동으로 채널 방식으로 돌아가요._")
+        else:
+            msg = ("📱 **채널 방식**으로 설정했어요 — **🎴 내 손패** 버튼으로 진행해요.\n"
+                   "_이 설정은 나에게만 적용돼요._")
+        await interaction.response.send_message(msg, ephemeral=True)
 
     async def _join(self, interaction):
         if self.table.add_human(interaction.user):
