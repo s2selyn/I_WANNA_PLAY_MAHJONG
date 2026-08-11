@@ -29,7 +29,7 @@ https://cloud.oracle.com 에서 **Start for free** → 가입.
 | 항목 | 선택할 것 |
 |---|---|
 | **Name** | 아무거나 (예: `mahjong-bot`) |
-| **Image** | **Canonical Ubuntu** (22.04 또는 24.04) — `Edit` → `Change image` 에서 변경 |
+| **Image** | **Canonical Ubuntu** 또는 기본 **Oracle Linux** 둘 다 OK (설치 스크립트가 둘 다 지원) |
 | **Shape** | 아래 참고 |
 | **Networking** | 기본값 그대로. **"Assign a public IPv4 address" 가 Yes** 인지만 확인 ⭐ |
 | **SSH keys** | **Generate a key pair for me** → **Save private key** 로 키 파일 다운로드 ⭐ |
@@ -52,7 +52,17 @@ https://cloud.oracle.com 에서 **Start for free** → 가입.
 
 ## 2. SSH 접속
 
-Ubuntu 이미지의 기본 유저는 **`ubuntu`** 예요.
+접속 유저명은 **이미지마다 달라요**:
+
+| 이미지 | 유저명 |
+|---|---|
+| Canonical Ubuntu | `ubuntu` |
+| Oracle Linux | `opc` |
+
+> `Permission denied (publickey)` 가 뜨면 **십중팔구 유저명 문제**예요. 둘 다 시도해보세요.
+> 참고: 인스턴스 생성 폼에서 **Shape 를 나중에 바꾸면 이미지가 기본값(Oracle Linux)으로
+> 되돌아가요.** Ubuntu 를 원하면 **Shape 를 먼저 고르고 이미지를 나중에** 선택하세요.
+> (어느 쪽이든 설치 스크립트는 동작하니 굳이 맞출 필요는 없어요.)
 
 **맥 / 리눅스**
 ```bash

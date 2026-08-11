@@ -14,9 +14,32 @@ BRANCH="${BRANCH:-main}"
 DEST="/opt/mahjong-bot"   # 레포를 여기에 clone (레포 루트 = 봇 파일)
 
 echo "==> 패키지 설치 (python, venv, git, ffmpeg)"
-sudo apt-get update -y
-# ffmpeg 는 음성 채널 효과음 재생에 필요 (효과음 안 쓰면 없어도 무방)
-sudo apt-get install -y python3 python3-venv python3-pip git ffmpeg
+# ffmpeg 는 음성 채널 효과음 재생에만 필요해요. 설치에 실패해도 봇은 정상 동작하고
+# 효과음만 조용히 비활성화됩니다.
+PY=python3
+if command -v apt-get >/dev/null 2>&1; then
+  # Debian / Ubuntu
+  sudo apt-get update -y
+  sudo apt-get install -y python3 python3-venv python3-pip git ffmpeg
+elif command -v dnf >/dev/null 2>&1; then
+  # Oracle Linux / RHEL / Rocky / Alma
+  sudo dnf install -y git
+  # 3.11 이 있으면 그걸 쓰고(권장), 없으면 배포판 기본 python3
+  if sudo dnf install -y python3.11 python3.11-pip >/dev/null 2>&1; then
+    PY=python3.11
+  else
+    sudo dnf install -y python3 python3-pip
+  fi
+  # ffmpeg 는 기본 저장소에 없어서 EPEL 을 붙여요 (실패해도 계속 진행)
+  sudo dnf install -y oracle-epel-release-el9 >/dev/null 2>&1 \
+    || sudo dnf install -y epel-release >/dev/null 2>&1 || true
+  sudo dnf install -y ffmpeg-free >/dev/null 2>&1 \
+    || sudo dnf install -y ffmpeg >/dev/null 2>&1 \
+    || echo "!! ffmpeg 설치를 건너뛰었어요 — 효과음만 비활성화되고 게임은 정상 동작해요."
+else
+  echo "!! 지원하지 않는 배포판이에요. python3 / git / ffmpeg 를 직접 설치한 뒤 다시 실행하세요."
+  exit 1
+fi
 
 echo "==> 코드 받기 ($BRANCH)"
 sudo mkdir -p "$DEST"
@@ -29,8 +52,8 @@ else
   git clone --branch "$BRANCH" "$REPO" "$DEST"
 fi
 
-echo "==> 가상환경 & 의존성"
-python3 -m venv "$DEST/venv"
+echo "==> 가상환경 & 의존성 ($PY)"
+"$PY" -m venv "$DEST/venv"
 "$DEST/venv/bin/pip" install --upgrade pip
 "$DEST/venv/bin/pip" install -r "$DEST/requirements.txt"
 
