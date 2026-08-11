@@ -16,6 +16,7 @@ Type `!mj` (or `!mj 3`) in a channel to open a lobby, then everyone clicks 참�
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 
@@ -35,6 +36,13 @@ from mahjong.render import (
 )
 from mahjong.tiles import Tile, kind_kr, kind_to_str
 
+# Remembered per-user hand-delivery preference, so nobody has to re-pick every
+# game. Just {user_id: "dm"|"channel"} — no game or message content is stored.
+DATA_DIR = os.environ.get(
+    "MJ_DATA_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+PREFS_PATH = os.path.join(DATA_DIR, "prefs.json")
+
 CALL_TIMEOUT = 30     # seconds to decide on a call
 TURN_TIMEOUT = 60     # auto-discard if a human goes AFK
 LOBBY_TIMEOUT = 3600  # close an unstarted lobby after this much inactivity
@@ -49,6 +57,43 @@ SOUNDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")
 SOUND_EXTS = (".mp3", ".ogg", ".wav", ".m4a")
 SOUND_NAMES = ("riichi", "ron", "tsumo", "pon", "chi", "kan")
 MAX_SOUND_BYTES = 1024 * 1024  # 1 MB — effects should be short
+
+
+def load_prefs() -> dict[int, str]:
+    """Read remembered mode preferences; a broken file just means 'no prefs'."""
+    try:
+        with open(PREFS_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    prefs = {}
+    for k, v in (raw.items() if isinstance(raw, dict) else ()):
+        if v in ("dm", "channel"):
+            try:
+                prefs[int(k)] = v
+            except (TypeError, ValueError):
+                continue
+    return prefs
+
+
+def save_prefs(prefs: dict[int, str]) -> None:
+    """Write atomically so an interrupted write can't truncate the file."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = PREFS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in prefs.items()}, f)
+        os.replace(tmp, PREFS_PATH)
+    except OSError as exc:  # 저장 실패해도 게임은 계속돼요
+        print(f"[prefs] save failed: {exc}", flush=True)
+
+
+user_prefs: dict[int, str] = load_prefs()
+
+
+def set_user_pref(user_id: int, mode: str) -> None:
+    user_prefs[user_id] = mode
+    save_prefs(user_prefs)
 
 
 def guild_sounds_dir(guild_id: int) -> str:
@@ -230,10 +275,12 @@ class Table:
             self.lobby_task = asyncio.create_task(_lobby_expiry(self))
 
     def mode_of(self, user_id: int | None) -> str:
-        """Personal delivery mode, falling back to the table default."""
+        """Delivery mode: this game's choice > remembered pref > table default."""
         if user_id is None:
             return self.mode
-        return self.player_modes.get(user_id, self.mode)
+        if user_id in self.player_modes:
+            return self.player_modes[user_id]
+        return user_prefs.get(user_id, self.mode)
 
     def round_wind_name(self) -> str:
         return kind_kr([27, 28, 29, 30][self.round_wind_idx])
@@ -518,13 +565,15 @@ class ControlView(discord.ui.View):
             return
         new = "dm" if t.mode_of(uid) == "channel" else "channel"
         t.player_modes[uid] = new
+        set_user_pref(uid, new)  # 다음 판에도 기억해요
         if new == "dm":
             msg = ("💻 **DM 방식**으로 바꿨어요 — 이제 손패가 DM으로 자동으로 와요.\n"
                    "_DM이 막혀 있으면 자동으로 채널 방식으로 돌아가요._")
         else:
             msg = ("📱 **채널 방식**으로 바꿨어요 — **🎴 내 손패** 버튼으로 진행하세요.\n"
                    "_이 설정은 나에게만 적용돼요._")
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.response.send_message(
+            msg + "\n_이 선택은 다음 판에도 기억돼요._", ephemeral=True)
 
     async def _hand(self, interaction: discord.Interaction):
         t = self.table
@@ -576,9 +625,9 @@ class LobbyView(discord.ui.View):
         def tag(p):
             if p.is_ai:
                 return " 🤖"
-            # 기본값과 다르게 개인 설정을 한 사람만 표시해요
-            if p.user_id in t.player_modes:
-                return " 📱" if t.player_modes[p.user_id] == "channel" else " 💻"
+            # 개인 설정(이번 판 선택 또는 기억된 취향)이 있는 사람만 표시해요
+            if p.user_id in t.player_modes or p.user_id in user_prefs:
+                return " 📱" if t.mode_of(p.user_id) == "channel" else " 💻"
             return ""
 
         names = "\n".join(f"　{i+1}. {p.name}{tag(p)}" for i, p in enumerate(t.seats)) \
@@ -612,6 +661,7 @@ class LobbyView(discord.ui.View):
             return
         new = "dm" if t.mode_of(uid) == "channel" else "channel"
         t.player_modes[uid] = new
+        set_user_pref(uid, new)  # 다음 판에도 기억해요
         t.touch_lobby()
         if new == "dm":
             msg = ("💻 **DM 방식**으로 설정했어요 — 시작하면 손패가 DM으로 자동으로 와요.\n"
@@ -619,7 +669,8 @@ class LobbyView(discord.ui.View):
         else:
             msg = ("📱 **채널 방식**으로 설정했어요 — **🎴 내 손패** 버튼으로 진행해요.\n"
                    "_이 설정은 나에게만 적용돼요._")
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.response.send_message(
+            msg + "\n_이 선택은 다음 판에도 기억돼요._", ephemeral=True)
 
     async def _join(self, interaction):
         if self.table.add_human(interaction.user):
