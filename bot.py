@@ -16,9 +16,11 @@ Type `!mj` (or `!mj 3`) in a channel to open a lobby, then everyone clicks 참�
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import os
 import random
+import re
 
 import discord
 from discord.ext import commands
@@ -139,17 +141,34 @@ def guild_sounds_dir(guild_id: int) -> str:
     return os.path.join(SOUNDS_DIR, str(guild_id))
 
 
-def sound_path(name: str, guild_id: int | None = None) -> str | None:
+def sound_variants(name: str, guild_id: int | None = None) -> list[str]:
+    """All recordings for one event, e.g. tsumo.mp3 / tsumo2.mp3 / tsumo_a.m4a.
+
+    A server's own uploads win outright: if this guild has any recording for
+    the event we use only those, so a custom set never gets mixed with the
+    shipped defaults.
+    """
     dirs = []
     if guild_id is not None:
         dirs.append(guild_sounds_dir(guild_id))
     dirs.append(SOUNDS_DIR)
     for d in dirs:
+        hits = []
         for ext in SOUND_EXTS:
-            p = os.path.join(d, name + ext)
-            if os.path.exists(p):
-                return p
-    return None
+            hits += glob.glob(os.path.join(d, f"{name}*{ext}"))
+        # "chi" 가 "chi3" 는 잡되 엉뚱한 이름은 안 잡도록 접미사를 제한해요
+        hits = [h for h in hits
+                if re.fullmatch(rf"{re.escape(name)}[-_ ]?\d*[a-zA-Z]?",
+                                os.path.splitext(os.path.basename(h))[0])]
+        if hits:
+            return sorted(hits)
+    return []
+
+
+def sound_path(name: str, guild_id: int | None = None) -> str | None:
+    """Pick one recording for the event (randomly, when several exist)."""
+    hits = sound_variants(name, guild_id)
+    return random.choice(hits) if hits else None
 
 
 def play_sound(table: "Table", name: str) -> None:
@@ -1226,7 +1245,9 @@ SOUND_HELP = (
     "🔊 **효과음 설정** (서버 관리자 전용)\n"
     f"등록 가능: {' · '.join(f'`{n}`' for n in SOUND_NAMES)}\n"
     "· `!mj sound` — 현재 등록된 효과음 목록\n"
-    "· `!mj sound <이름>` + **음성파일 첨부** — 등록/교체\n"
+    "· `!mj sound <이름>` + **음성파일 첨부** — 등록/교체 (여러 개 첨부 가능)\n"
+    "· `!mj sound add <이름>` + 첨부 — 기존 건 두고 **한 종류 더** 추가\n"
+    "　같은 이름에 여러 개면 **랜덤**으로 하나씩 재생돼요 🎲\n"
     "· `!mj sound clear <이름>` — 삭제 (`clear all` 이면 전체)\n"
     f"파일: {' / '.join(SOUND_EXTS)} · 최대 {MAX_SOUND_BYTES // 1024}KB · 짧게(1~3초) 권장"
 )
@@ -1246,11 +1267,12 @@ async def sound_cmd(ctx, args: list[str]):
     if not args or args[0] in ("list", "목록"):
         lines = []
         for n in SOUND_NAMES:
-            own = sound_path(n, ctx.guild.id)
-            if own and own.startswith(guild_sounds_dir(ctx.guild.id)):
-                lines.append(f"· `{n}` — ✅ 이 서버 전용 ({os.path.splitext(own)[1]})")
-            elif own:
-                lines.append(f"· `{n}` — 🌐 기본 효과음")
+            hits = sound_variants(n, ctx.guild.id)
+            more = f" · {len(hits)}종 랜덤" if len(hits) > 1 else ""
+            if hits and hits[0].startswith(guild_sounds_dir(ctx.guild.id)):
+                lines.append(f"· `{n}` — ✅ 이 서버 전용{more}")
+            elif hits:
+                lines.append(f"· `{n}` — 🌐 기본 효과음{more}")
             else:
                 lines.append(f"· `{n}` — ❌ 없음")
         await ctx.send("🔊 **이 서버의 효과음**\n" + "\n".join(lines)
@@ -1268,10 +1290,10 @@ async def sound_cmd(ctx, args: list[str]):
             return
         names = SOUND_NAMES if target == "all" else (target,)
         removed = []
+        gdir = guild_sounds_dir(ctx.guild.id)
         for n in names:
-            for ext in SOUND_EXTS:
-                p = os.path.join(guild_sounds_dir(ctx.guild.id), n + ext)
-                if os.path.exists(p):
+            for p in sound_variants(n, ctx.guild.id):
+                if p.startswith(gdir):  # 기본 효과음은 건드리지 않아요
                     os.remove(p)
                     removed.append(n)
         if removed:
@@ -1282,7 +1304,9 @@ async def sound_cmd(ctx, args: list[str]):
         return
 
     # upload --------------------------------------------------------------
-    name = args[0]
+    # `!mj sound add tsumo` 는 기존 것을 두고 한 종류를 더 얹어요
+    append = args[0] in ("add", "추가")
+    name = args[1] if append and len(args) > 1 else args[0]
     if name not in SOUND_NAMES:
         await ctx.send(f"`{name}` 은(는) 모르는 이름이에요.\n\n{SOUND_HELP}")
         return
@@ -1293,31 +1317,39 @@ async def sound_cmd(ctx, args: list[str]):
         await ctx.send(f"음성 파일을 **첨부**해서 다시 보내주세요.\n\n{SOUND_HELP}")
         return
 
-    att = ctx.message.attachments[0]
-    ext = os.path.splitext(att.filename)[1].lower()
-    if ext not in SOUND_EXTS:
-        await ctx.send(f"지원하지 않는 형식이에요 ({ext or '확장자 없음'}). "
-                       f"{' / '.join(SOUND_EXTS)} 중 하나로 올려주세요.")
-        return
-    if att.size > MAX_SOUND_BYTES:
-        await ctx.send(f"파일이 너무 커요 ({att.size // 1024}KB). "
-                       f"{MAX_SOUND_BYTES // 1024}KB 이하로 올려주세요.")
-        return
-
     dest_dir = guild_sounds_dir(ctx.guild.id)
     os.makedirs(dest_dir, exist_ok=True)
-    for old in SOUND_EXTS:  # replace any existing version of this effect
-        p = os.path.join(dest_dir, name + old)
-        if os.path.exists(p):
+    gdir_hits = [p for p in sound_variants(name, ctx.guild.id) if p.startswith(dest_dir)]
+    if not append:
+        for p in gdir_hits:  # 교체: 이 서버의 기존 녹음은 지워요
             os.remove(p)
-    try:
-        await att.save(os.path.join(dest_dir, name + ext))
-    except Exception as exc:
-        print(f"[sound] save failed: {exc}")
-        await ctx.send("저장에 실패했어요. 잠시 후 다시 시도해 주세요.")
+        gdir_hits = []
+
+    saved = []
+    for att in ctx.message.attachments:  # 한 번에 여러 개 첨부해도 돼요
+        ext = os.path.splitext(att.filename)[1].lower()
+        if ext not in SOUND_EXTS:
+            await ctx.send(f"건너뜀 — 지원하지 않는 형식 `{att.filename}` "
+                           f"({' / '.join(SOUND_EXTS)} 만 돼요)")
+            continue
+        if att.size > MAX_SOUND_BYTES:
+            await ctx.send(f"건너뜀 — `{att.filename}` 이 너무 커요 "
+                           f"({att.size // 1024}KB > {MAX_SOUND_BYTES // 1024}KB)")
+            continue
+        n = len(gdir_hits) + len(saved)
+        stem = name if n == 0 else f"{name}{n + 1}"  # tsumo, tsumo2, tsumo3 …
+        try:
+            await att.save(os.path.join(dest_dir, stem + ext))
+            saved.append(stem + ext)
+        except Exception as exc:
+            print(f"[sound] save failed: {exc}", flush=True)
+            await ctx.send(f"`{att.filename}` 저장에 실패했어요.")
+
+    if not saved:
         return
-    await ctx.send(f"✅ `{name}` 효과음을 이 서버에 등록했어요! ({ext}, "
-                   f"{att.size // 1024}KB)")
+    total = len(sound_variants(name, ctx.guild.id))
+    extra = f"\n이제 `{name}` 은 **{total}종 중 랜덤**으로 재생돼요 🎲" if total > 1 else ""
+    await ctx.send(f"✅ `{name}` 효과음 **{len(saved)}개** 등록! ({', '.join(saved)}){extra}")
 
 
 # ---------------------------------------------------------------------------
