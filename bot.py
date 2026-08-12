@@ -374,15 +374,26 @@ class Table:
 
     # voice ----------------------------------------------------------------
     async def join_voice(self, member) -> None:
-        """Join the member's current voice channel (best-effort, optional)."""
+        """Join (or move to) the member's voice channel. Best-effort — a failure
+        here just means the game runs without sound.
+
+        Returns the channel joined, or None if there was nothing to join.
+        """
         ch = getattr(getattr(member, "voice", None), "channel", None)
-        if ch is None or self.voice is not None:
-            return
+        if ch is None:
+            return None
         try:
-            self.voice = await ch.connect()
+            if self.voice is not None and self.voice.is_connected():
+                if self.voice.channel.id == ch.id:
+                    return ch  # 이미 그 채널에 있어요
+                await self.voice.move_to(ch)
+            else:
+                self.voice = await ch.connect()
+            return ch
         except Exception as exc:  # missing PyNaCl, no perms, etc. → text-only
-            print(f"[voice] connect failed: {exc}")
+            print(f"[voice] connect failed: {exc}", flush=True)
             self.voice = None
+            return None
 
     async def leave_voice(self) -> None:
         self.sound_queue.clear()
@@ -1353,6 +1364,37 @@ async def sound_cmd(ctx, args: list[str]):
 
 
 # ---------------------------------------------------------------------------
+# voice channel (`!mj voice`) — call the bot in or send it away mid-game
+# ---------------------------------------------------------------------------
+async def voice_cmd(ctx, args: list[str]):
+    table = tables.get(ctx.channel.id)
+    if table is None:
+        await ctx.send("이 채널에 진행 중인 대국이 없어요. 먼저 `!mj` 로 방을 열어주세요.")
+        return
+
+    if args and args[0] in ("leave", "out", "나가", "퇴장"):
+        if table.voice is None:
+            await ctx.send("봇이 음성 채널에 없어요.")
+            return
+        await table.leave_voice()
+        await ctx.send("👋 음성 채널에서 나왔어요.")
+        return
+
+    ch = await table.join_voice(ctx.author)
+    if ch is None:
+        if getattr(getattr(ctx.author, "voice", None), "channel", None) is None:
+            await ctx.send("먼저 **음성 채널에 들어간 뒤** `!mj voice` 를 쳐주세요 🎙")
+        else:
+            await ctx.send("음성 채널에 못 들어갔어요. 봇에게 **연결·말하기** 권한이 있는지 "
+                           "확인해주세요.")
+        return
+    n = sum(len(sound_variants(s, ctx.guild.id if ctx.guild else None))
+            for s in SOUND_NAMES)
+    tail = "" if n else "\n_아직 등록된 효과음이 없어요 — `!mj sound` 로 올릴 수 있어요._"
+    await ctx.send(f"🎙 **{ch.name}** 에 들어왔어요! 이제 효과음이 나와요 🔊{tail}")
+
+
+# ---------------------------------------------------------------------------
 # tile emoji management (`!mj emoji ...`) — bot owner only
 # ---------------------------------------------------------------------------
 async def emoji_cmd(ctx, args: list[str]):
@@ -1465,13 +1507,17 @@ async def mj_cmd(ctx, arg: str = None, *rest: str):
             "· 📱 **채널(모바일)**: 채널의 **🎴 내 손패** 버튼 → 나만 보이는 손패. DM 전환 없음\n"
             "· 💻 **DM(PC)**: 손패가 DM으로 자동으로 와요 (DM 허용 필요)\n"
             "남이 버리면 **🔔 콜**(채널) 또는 DM으로 론/퐁/치/깡/스킵 버튼이 떠요.\n"
-            "🔊 효과음: `!mj sound` (서버 관리자만 등록/삭제 가능)")
+            "🔊 효과음: `!mj sound` (서버 관리자만 등록/삭제 가능)\n"
+            "🎙 `!mj voice` — 봇을 지금 내 음성 채널로 부르기 (`!mj voice leave` 는 내보내기)")
         return
     if arg in ("sound", "효과음"):
         await sound_cmd(ctx, list(rest))
         return
     if arg in ("emoji", "이모지"):
         await emoji_cmd(ctx, list(rest))
+        return
+    if arg in ("voice", "음성", "보이스"):
+        await voice_cmd(ctx, list(rest))
         return
     if ctx.guild is None:
         # DM 에서는 로비를 열 수 없어요 — 여러 명이 참가해야 하고, 나만 보이는
