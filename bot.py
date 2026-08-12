@@ -440,9 +440,39 @@ async def clear_transient(table: Table) -> None:
             pass  # 이미 지워졌거나 권한이 없어도 그냥 넘어가요
 
 
+async def dismiss(interaction: discord.Interaction, fallback: str = "완료") -> None:
+    """Close the private (ephemeral) panel once the player has acted.
+
+    Leaving them around means every turn stacks another panel and pushes the
+    board out of view. Deleting is the clean outcome; if Discord refuses we at
+    least strip the buttons and shrink it to one line.
+    """
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        await interaction.delete_original_response()
+    except discord.HTTPException:
+        try:
+            await interaction.edit_original_response(content=fallback, view=None)
+        except discord.HTTPException:
+            pass
+
+
+def auto_dismiss(interaction: discord.Interaction, delay: float = 30.0) -> None:
+    """Fade out an informational private panel so it stops piling up."""
+    async def run():
+        await asyncio.sleep(delay)
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException:
+            pass
+    asyncio.create_task(run())
+
+
 async def dead_game(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(
         "이미 끝난 대국이에요. `!mj` 로 새로 시작해주세요.", ephemeral=True)
+    auto_dismiss(interaction, 15)
 
 
 # ---------------------------------------------------------------------------
@@ -548,22 +578,22 @@ class TurnView(discord.ui.View):
     def _make_discard(self, tile: Tile):
         async def cb(interaction: discord.Interaction):
             if not self._valid():
-                await interaction.response.edit_message(view=disable_view(self))
+                await dismiss(interaction, "이미 지난 차례예요.")
                 return
             r = self.table.round
             r.discard(Tile(tile.kind, tile.aka))
-            await interaction.response.edit_message(
-                content=f"버렸어요: {tile_glyph(tile)}", view=disable_view(self))
+            await dismiss(interaction, f"버렸어요: {tile_glyph(tile)}")
             await announce_discard(self.table, r.players[self.seat], tile)
             await advance(self.table)
         return cb
 
     async def _tsumo(self, interaction: discord.Interaction):
         if not self._valid():
+            await dismiss(interaction, "이미 지난 차례예요.")
             return
         self.table.round.declare_tsumo()
         play_sound(self.table, "tsumo")
-        await interaction.response.edit_message(content="🀄 쯔모!", view=disable_view(self))
+        await dismiss(interaction, "🀄 쯔모!")
         await finish_round(self.table)
 
     async def _riichi(self, interaction: discord.Interaction):
@@ -580,8 +610,7 @@ class TurnView(discord.ui.View):
             r = self.table.round
             r.declare_riichi(tile)
             play_sound(self.table, "riichi")
-            await interaction.response.edit_message(
-                content=f"🎏 리치 선언, {tile_glyph(tile)} 버림", view=None)
+            await dismiss(interaction, f"🎏 리치 선언, {tile_glyph(tile)} 버림")
             await self.table.channel.send(
                 f"🎏 **{r.players[self.seat].name}** 리치! → {tile_glyph(tile)}")
             await advance(self.table)
@@ -599,8 +628,7 @@ class TurnView(discord.ui.View):
         async def run(interaction):
             r = self.table.round
             r.declare_kan(tile)
-            await interaction.response.edit_message(
-                content=f"🔶 깡: {tile_glyph(tile)}", view=None)
+            await dismiss(interaction, f"🔶 깡: {tile_glyph(tile)}")
             if r.phase == "calls":            # chankan window opened
                 await run_call_window(self.table)
             else:
@@ -654,14 +682,15 @@ class CallView(discord.ui.View):
                               style=discord.ButtonStyle.primary))
         self.add_item(Btn("스킵", self._make("skip"), style=discord.ButtonStyle.danger))
 
+    _LABEL = {"ron": "🀄 론!", "pon": "퐁!", "kan": "깡!", "chi": "치!",
+              "skip": "스킵"}
+
     def _make(self, action, value=None):
         async def cb(interaction: discord.Interaction):
             if not is_live(self.table):
-                await interaction.response.edit_message(
-                    content="이미 끝난 대국이에요.", view=disable_view(self))
+                await dismiss(interaction, "이미 끝난 대국이에요.")
                 return
-            await interaction.response.edit_message(
-                content=f"선택: {action}", view=disable_view(self))
+            await dismiss(interaction, self._LABEL.get(action, action))
             await record_call(self.table, self.seat, action, value)
         return cb
 
@@ -717,6 +746,7 @@ class ControlView(discord.ui.View):
                    "_이 설정은 나에게만 적용돼요._")
         await interaction.response.send_message(
             msg + "\n_이 선택은 다음 판에도 기억돼요._", ephemeral=True)
+        auto_dismiss(interaction, 20)
 
     async def _hand(self, interaction: discord.Interaction):
         t = self.table
@@ -735,6 +765,7 @@ class ControlView(discord.ui.View):
         else:
             await interaction.response.send_message(
                 readonly_hand_content(t, p), ephemeral=True)
+            auto_dismiss(interaction)  # 보기 전용 패널은 잠시 뒤 사라져요
 
     async def _call(self, interaction: discord.Interaction):
         t = self.table
@@ -827,6 +858,7 @@ class LobbyView(discord.ui.View):
                    "_이 설정은 나에게만 적용돼요._")
         await interaction.response.send_message(
             msg + "\n_이 선택은 다음 판에도 기억돼요._", ephemeral=True)
+        auto_dismiss(interaction, 20)
 
     async def _join(self, interaction):
         if self.table.add_human(interaction.user):
