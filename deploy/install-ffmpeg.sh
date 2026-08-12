@@ -53,38 +53,59 @@ restore_bot() {
 # SSH 가 끊겨(HUP) 중간에 죽더라도 봇은 반드시 다시 켜지도록
 trap restore_bot EXIT INT TERM HUP
 
-echo "==> dnf 캐시 정리"
-sudo dnf clean all >/dev/null 2>&1 || true
-
-# EPEL 저장소 id 찾기 (배포판마다 이름이 달라요: ol9_developer_EPEL, epel ...)
-EPEL_ID="$(sudo dnf repolist --all 2>/dev/null \
-  | awk 'tolower($1) ~ /epel/ {print $1; exit}')"
-
-if [ -z "$EPEL_ID" ]; then
-  echo "==> EPEL 저장소가 없어 먼저 설치합니다"
-  sudo dnf install -y --setopt=install_weak_deps=False \
-    oracle-epel-release-el9 || sudo dnf install -y epel-release || {
-      echo "!! EPEL 설치 실패 — 효과음 없이 사용하셔도 게임은 정상입니다."; exit 1; }
-  EPEL_ID="$(sudo dnf repolist --all 2>/dev/null \
-    | awk 'tolower($1) ~ /epel/ {print $1; exit}')"
+if command -v apt-get >/dev/null 2>&1; then PKG=apt
+elif command -v dnf >/dev/null 2>&1; then PKG=dnf
+else PKG=""
 fi
-echo "==> EPEL 저장소: ${EPEL_ID:-(찾지 못함)}"
 
-echo "==> ffmpeg 설치 (필요한 저장소만 + weak deps 제외)"
-REPOS="ol9_baseos_latest,ol9_appstream,${EPEL_ID}"
-if sudo dnf install -y \
-      --disablerepo='*' --enablerepo="$REPOS" \
-      --setopt=install_weak_deps=False \
-      ffmpeg-free; then
-  echo "✅ 설치 성공"
-elif sudo dnf install -y --setopt=install_weak_deps=False ffmpeg-free; then
-  echo "✅ 설치 성공 (전체 저장소 사용)"
+have_ffmpeg() { command -v ffmpeg >/dev/null 2>&1 || [ -x /usr/local/bin/ffmpeg ]; }
+
+# --- 1) 정적 바이너리 (가장 확실 · dnf 메타데이터를 안 써서 램도 거의 안 먹어요) ---
+# Oracle Linux 의 EPEL 에는 ffmpeg 계열 패키지가 아예 없어서, 패키지 설치는
+# 몇 분을 돌고도 "No match for argument" 로 끝나요. 그래서 이 방법을 먼저 씁니다.
+install_static() {
+  echo "==> 정적 ffmpeg 빌드를 내려받아요 (약 30MB)"
+  command -v xz >/dev/null 2>&1 || sudo dnf install -y xz >/dev/null 2>&1 || true
+  tmp="$(mktemp -d)"
+  url="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+  [ "$(uname -m)" = "aarch64" ] && \
+    url="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz"
+  if ! curl -fL --retry 3 -o "$tmp/f.tar.xz" "$url"; then
+    rm -rf "$tmp"; return 1
+  fi
+  tar xJf "$tmp/f.tar.xz" -C "$tmp" || { rm -rf "$tmp"; return 1; }
+  d="$(find "$tmp" -maxdepth 1 -type d -name 'ffmpeg-*-static' | head -1)"
+  [ -n "$d" ] || { rm -rf "$tmp"; return 1; }
+  sudo install -m 755 "$d/ffmpeg"  /usr/local/bin/ffmpeg
+  sudo install -m 755 "$d/ffprobe" /usr/local/bin/ffprobe 2>/dev/null || true
+  rm -rf "$tmp"
+  have_ffmpeg
+}
+
+# --- 2) 패키지 매니저 (Ubuntu 등) ---
+install_pkg() {
+  if [ "$PKG" = apt ]; then
+    sudo apt-get update -y && sudo apt-get install -y ffmpeg
+  else
+    # RPM Fusion 에는 EL9 용 ffmpeg 가 있어요 (EPEL 에는 없음)
+    sudo dnf install -y --nogpgcheck \
+      "https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-9.noarch.rpm" \
+      >/dev/null 2>&1 || true
+    sudo dnf install -y --setopt=install_weak_deps=False --allowerasing ffmpeg \
+      || sudo dnf install -y --setopt=install_weak_deps=False ffmpeg-free
+  fi
+}
+
+if install_static; then
+  echo "✅ 정적 빌드 설치 성공"
+elif install_pkg && have_ffmpeg; then
+  echo "✅ 패키지로 설치 성공"
 else
   echo "!! ffmpeg 설치 실패 — 효과음만 비활성화되고 게임은 정상 동작해요."
   exit 1
 fi
 
-ffmpeg -version | head -1 || true
+ffmpeg -version 2>/dev/null | head -1 || /usr/local/bin/ffmpeg -version | head -1
 echo
 echo "효과음을 쓰려면 봇 재시작 없이 바로 사용할 수 있어요:"
 echo "  !mj sound riichi   (음성 파일 첨부)"
