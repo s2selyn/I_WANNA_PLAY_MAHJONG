@@ -25,6 +25,10 @@ TARBALL="https://codeload.github.com/s2selyn/I_WANNA_PLAY_MAHJONG/tar.gz/refs/he
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# 봇을 실행할 계정. 보통은 지금 이 스크립트를 돌리는 사람이지만, 자동 배포처럼
+# root 로 실행될 때는 BOT_USER 로 알려줍니다 (root 로 봇이 돌아가지 않도록).
+BOT_USER="${BOT_USER:-$USER}"
+
 # 이 스크립트는 실행 도중 $DEST 를 통째로 갱신하는데, 그 안에는 자기 자신도 들어
 # 있습니다. bash 는 스크립트를 읽어가며 실행하기 때문에 실행 중 파일이 바뀌면
 # 엉뚱한 줄을 읽을 수 있어요. $DEST 안에서 실행됐다면 임시 복사본으로 재실행합니다.
@@ -83,7 +87,7 @@ echo "==> 파이썬: $($PY --version 2>&1)"
 # --- 2. 코드 받기 (git 없으면 tarball 로) ------------------------------------
 echo "==> 코드 받기 ($BRANCH)"
 sudo mkdir -p "$DEST"
-sudo chown "$USER":"$USER" "$DEST"
+sudo chown "$BOT_USER":"$BOT_USER" "$DEST"
 if [ -d "$DEST/.git" ] && have git; then
   git -C "$DEST" fetch origin "$BRANCH"
   git -C "$DEST" checkout "$BRANCH"
@@ -116,7 +120,7 @@ fi
 
 # --- 5. systemd -------------------------------------------------------------
 echo "==> systemd 서비스 등록"
-sudo sed "s/^User=.*/User=$USER/" "$DEST/deploy/mahjong-bot.service" \
+sudo sed "s/^User=.*/User=$BOT_USER/" "$DEST/deploy/mahjong-bot.service" \
   | sudo tee /etc/systemd/system/mahjong-bot.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable mahjong-bot

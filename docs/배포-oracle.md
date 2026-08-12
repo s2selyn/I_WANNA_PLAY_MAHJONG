@@ -137,6 +137,37 @@ bash /opt/mahjong-bot/deploy/setup.sh
 sudo systemctl restart mahjong-bot
 ```
 
+### 🤖 자동 배포 (선택)
+
+매번 SSH 접속하기 귀찮다면, VM 이 주기적으로 깃허브를 확인해서
+**새 커밋이 있을 때만** 알아서 배포하도록 할 수 있어요.
+
+```bash
+bash /opt/mahjong-bot/deploy/install-auto-update.sh
+```
+
+기본은 **매일 20:00 UTC(한국 새벽 5시)** 예요. 주기를 바꾸려면:
+
+```bash
+# 하루 두 번
+SCHEDULE='*-*-* 03,15:00:00' bash /opt/mahjong-bot/deploy/install-auto-update.sh
+# 매시 정각
+SCHEDULE='hourly'            bash /opt/mahjong-bot/deploy/install-auto-update.sh
+```
+
+| 하고 싶은 것 | 명령 |
+|---|---|
+| 지금 바로 배포 | `sudo systemctl start mahjong-update` |
+| 기록 보기 | `journalctl -u mahjong-update -n 30 --no-pager` |
+| 다음 실행 시각 | `systemctl list-timers mahjong-update` |
+| 끄기 | `sudo systemctl disable --now mahjong-update.timer` |
+
+- 변경이 없으면 **아무것도 하지 않아요** (봇도 재시작 안 함)
+- 배포나 재시작이 실패하면 기록을 남기지 않아서 **다음 주기에 다시 시도**해요
+- 자동 배포를 켜도 **수동 배포는 그대로** 됩니다
+- ⚠️ 배포되면 봇이 재시작되므로 **진행 중이던 판은 사라져요.**
+  그래서 기본값이 새벽 시간대예요.
+
 ---
 
 ## 🩹 문제 해결
