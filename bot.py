@@ -21,6 +21,7 @@ import json
 import os
 import random
 import re
+import traceback
 
 import discord
 from discord.ext import commands
@@ -804,10 +805,12 @@ class ControlView(discord.ui.View):
                                                     ephemeral=True)
             return
         name = interaction.user.display_name
+        last_human = sum(1 for q in t.seats if not q.is_ai) <= 1
         await interaction.response.send_message(
-            "🚪 나갔어요. 남은 자리는 AI가 이어서 둘게요.", ephemeral=True)
-        await t.channel.send(f"🚪 **{name}** 님이 나가서 **AI가 대신** 둡니다 🤖")
-        await leave_mid_game(t, interaction.user.id)
+            "🚪 나갔어요. 대국을 종료할게요." if last_human
+            else "🚪 나갔어요. 남은 자리는 AI가 이어서 둘게요.", ephemeral=True)
+        auto_dismiss(interaction, 10)
+        await leave_mid_game(t, interaction.user.id, name)
 
     async def _my_mode(self, interaction: discord.Interaction):
         """Toggle *this player's* hand delivery, independent of the table default."""
@@ -1038,22 +1041,32 @@ def seating_line(table: Table) -> str:
     return f"🎲 **자리 정하기** (무작위) — {order}"
 
 
-async def leave_mid_game(table: Table, user_id: int) -> bool:
-    """Hand a seat over to the AI so a player can drop out mid-hand."""
+async def leave_mid_game(table: Table, user_id: int, name: str = "") -> bool:
+    """Hand a seat over to the AI so a player can drop out mid-hand.
+
+    Announces the outcome itself: if the leaver is the last human, saying
+    "AI가 대신 둡니다" and then immediately ending reads as a contradiction —
+    there is nobody left to play for.
+    """
     seat = table.seat_of(user_id)
     r = table.round
     if seat is None or r is None or not table.started:
         return False
     p = table.seats[seat]
+    name = name or p.name
+    last_human = sum(1 for q in table.seats if not q.is_ai) <= 1
+
+    if last_human:
+        await table.channel.send(
+            f"🚪 **{name}** 님이 나가고 AI만 남아서 대국을 종료할게요.")
+        await end_game(table, "남은 플레이어가 없습니다.")
+        return True
+
     p.is_ai = True
     p.name = f"{p.name} 🤖"
     p.user_id = 0
     table.player_modes.pop(user_id, None)
-
-    if not any(not q.is_ai for q in table.seats):
-        await table.channel.send("🚪 사람이 모두 나가서 대국을 종료할게요.")
-        await end_game(table, "남은 플레이어가 없습니다.")
-        return True
+    await table.channel.send(f"🚪 **{name}** 님이 나가서 **AI가 대신** 둡니다 🤖")
 
     # 그 사람 차례였거나 콜 대기 중이었으면 판이 멈추지 않게 이어줘요
     if table.awaiting and seat in table.call_eligible and seat not in table.call_choices:
@@ -1109,9 +1122,32 @@ async def send_turn(table: Table, seat: int):
 
 
 async def advance(table: Table):
+    """Drive the round forward, surfacing failures instead of freezing.
+
+    Everything below runs from a button callback or a timer, so an exception
+    here used to vanish into the logs and leave the table silently stuck: the
+    last turn notice still pointing at a player whose turn had already passed,
+    and no way to act. Report it in the channel with a way out.
+    """
+    try:
+        await _advance(table)
+    except Exception:
+        traceback.print_exc()
+        if is_live(table):
+            try:
+                await table.channel.send(
+                    "⚠️ 진행 중 오류가 났어요. **`!mj stop`** 으로 정리한 뒤 "
+                    "`!mj` 로 다시 시작해주세요.")
+            except discord.HTTPException:
+                pass
+
+
+async def _advance(table: Table):
     """Drive AI turns and auto-passes until a human must act or the round ends."""
     r = table.round
     while True:
+        if not is_live(table):
+            return  # 종료된 대국은 더 진행하지 않아요
         if r.phase == "ended":
             await finish_round(table)
             return
