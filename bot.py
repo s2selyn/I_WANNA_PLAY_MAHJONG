@@ -273,6 +273,8 @@ class Table:
         # 진행용 메시지(로비·보드·차례 알림·콜 안내…). 대국이 끝나면 지워서
         # 결과만 남기고, 남은 버튼으로 끝난 판을 되살리는 일도 막아요.
         self.transient: list[discord.Message] = []
+        # 매 턴 새로 뜨는 알림(차례·콜)은 종류별로 최신 하나만 남겨요.
+        self.notices: dict[str, discord.Message] = {}
         self.mode = "channel"  # table default: "channel" (mobile) or "dm" (PC)
         self.player_modes: dict[int, str] = {}  # user_id -> personal override
         self.host_id: int | None = None  # who opened the room (lobby controls)
@@ -426,9 +428,40 @@ async def send_transient(table: Table, *args, **kwargs) -> discord.Message:
     return msg
 
 
+async def send_notice(table: Table, key: str, *args, **kwargs) -> discord.Message:
+    """Post a notice, replacing the previous one of the same kind.
+
+    Turn pings and call alerts fire every single turn. Posting them plainly
+    buries the board under a stack of stale "your turn" lines, so only the
+    newest of each kind is kept. A fresh message (not an edit) is still sent
+    so the @mention actually notifies.
+    """
+    old = table.notices.pop(key, None)
+    msg = await table.channel.send(*args, **kwargs)
+    table.notices[key] = msg
+    if old is not None:
+        try:
+            await old.delete()
+        except discord.HTTPException:
+            pass
+    return msg
+
+
+async def clear_notice(table: Table, key: str) -> None:
+    """Remove a notice once it no longer applies (e.g. the call window closed)."""
+    old = table.notices.pop(key, None)
+    if old is not None:
+        try:
+            await old.delete()
+        except discord.HTTPException:
+            pass
+
+
 async def clear_transient(table: Table) -> None:
     """Delete the progress messages, leaving only the results in the channel."""
     msgs, table.transient = table.transient, []
+    msgs.extend(table.notices.values())
+    table.notices.clear()
     for m in (table.lobby_msg, table.control_msg, table.board_msg):
         if m is not None and m not in msgs:
             msgs.append(m)
@@ -1013,13 +1046,15 @@ async def send_turn(table: Table, seat: int):
         try:
             dm = await dm_of(p.user_id)
             await dm.send(content=turn_content(table, p), view=TurnView(table, seat))
+            await clear_notice(table, "turn")  # DM 으로 갔으니 채널 알림은 치워요
             return
         except discord.Forbidden:
             # DM 이 막혀 있으면 채널 방식으로 자연스럽게 넘어가요
             await table.channel.send(
                 f"⚠️ <@{p.user_id}> DM을 열 수 없어 채널 방식으로 진행할게요.")
     # channel mode: no DM push; nudge the player to tap 🎴 내 손패
-    await send_transient(table, f"▶️ <@{p.user_id}> 님 차례 — **🎴 내 손패** 를 누르세요")
+    await send_notice(table, "turn",
+                      f"▶️ <@{p.user_id}> 님 차례 — **🎴 내 손패** 를 누르세요")
 
 
 async def advance(table: Table):
@@ -1081,7 +1116,8 @@ async def run_call_window(table: Table):
     else:
         where = f"(**🔔 콜** 버튼을 {CALL_TIMEOUT}s 안에 누르세요)"
 
-    await table.channel.send(
+    await send_notice(
+        table, "call",
         f"❗ {tile_glyph(tile)} 에 콜 가능: "
         + ", ".join(f"<@{r.players[s].user_id}>" for s in table.call_eligible)
         + f" {where}")
@@ -1158,6 +1194,7 @@ async def resolve_calls(table: Table):
         return
     table.call_resolved = True
     table.awaiting = False
+    await clear_notice(table, "call")  # 콜 창이 닫혔으니 안내도 치워요
     r = table.round
     choices = table.call_choices
 
@@ -1198,6 +1235,9 @@ async def resolve_calls(table: Table):
 
 
 async def finish_round(table: Table):
+    # 국이 끝났으니 남아 있는 차례/콜 알림은 의미가 없어요
+    await clear_notice(table, "turn")
+    await clear_notice(table, "call")
     r = table.round
     res = r.result
     lines = []
