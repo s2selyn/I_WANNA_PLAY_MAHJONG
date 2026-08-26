@@ -728,6 +728,57 @@ class CallView(discord.ui.View):
         return cb
 
 
+class CallNoticeView(discord.ui.View):
+    """Buttons on the public call alert.
+
+    Skipping used to require opening the private call panel first, which is a
+    lot of taps for the common "not interested" answer — so it gets its own
+    button right on the alert.
+    """
+
+    def __init__(self, table: Table):
+        super().__init__(timeout=None)
+        self.table = table
+        self.add_item(Btn("🔔 콜", self._call, style=discord.ButtonStyle.primary))
+        self.add_item(Btn("⏭️ 스킵", self._skip, style=discord.ButtonStyle.secondary))
+
+    def _seat(self, interaction) -> int | None:
+        """The clicker's seat, if they actually have a pending call."""
+        t = self.table
+        if not is_live(t) or not t.awaiting:
+            return None
+        seat = t.seat_of(interaction.user.id)
+        if seat is None or seat not in t.call_eligible or seat in t.call_choices:
+            return None
+        return seat
+
+    async def _call(self, interaction: discord.Interaction):
+        t = self.table
+        seat = self._seat(interaction)
+        if seat is None:
+            await interaction.response.send_message(
+                "지금 콜할 것이 없어요.", ephemeral=True)
+            auto_dismiss(interaction, 10)
+            return
+        tile = (t.round.pending_kakan[1] if t.round.pending_kakan
+                else t.round.last_discard[1])
+        await interaction.response.send_message(
+            f"❗ {tile_glyph(tile)} — 콜?", view=CallView(t, seat, t.round.pending_calls[seat]),
+            ephemeral=True)
+
+    async def _skip(self, interaction: discord.Interaction):
+        t = self.table
+        seat = self._seat(interaction)
+        if seat is None:
+            await interaction.response.send_message(
+                "지금 콜할 것이 없어요.", ephemeral=True)
+            auto_dismiss(interaction, 10)
+            return
+        await interaction.response.send_message("⏭️ 스킵했어요.", ephemeral=True)
+        auto_dismiss(interaction, 10)
+        await record_call(t, seat, "skip", None)
+
+
 class ControlView(discord.ui.View):
     """Persistent channel controls for mobile (ephemeral) mode.
 
@@ -1110,17 +1161,16 @@ async def run_call_window(table: Table):
             pass
 
     if len(dm_seats) == len(table.call_eligible):
-        where = f"(DM에서 {CALL_TIMEOUT}s 안에 선택)"
-    elif dm_seats:
-        where = f"(DM 또는 **🔔 콜** 버튼으로 {CALL_TIMEOUT}s 안에 선택)"
+        where = f"(DM 또는 아래 버튼으로 {CALL_TIMEOUT}초 안에 선택)"
     else:
-        where = f"(**🔔 콜** 버튼을 {CALL_TIMEOUT}s 안에 누르세요)"
+        where = f"(아래 버튼으로 {CALL_TIMEOUT}초 안에 선택 · 안 누르면 자동 스킵)"
 
     await send_notice(
         table, "call",
         f"❗ {tile_glyph(tile)} 에 콜 가능: "
         + ", ".join(f"<@{r.players[s].user_id}>" for s in table.call_eligible)
-        + f" {where}")
+        + f" {where}",
+        view=CallNoticeView(table))
 
     table.call_task = asyncio.create_task(_call_timer(table))
 
