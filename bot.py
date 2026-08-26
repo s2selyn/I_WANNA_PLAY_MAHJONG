@@ -1362,6 +1362,12 @@ async def end_game(table: Table, reason: str):
     table.cancel_timers()  # 남은 타이머가 끝난 판을 건드리지 않게
     table.started = False
     r = table.round
+    if r is None:  # 아직 한 국도 시작하지 않은 방 (로비만 있던 상태)
+        tables.pop(table.channel.id, None)
+        await clear_transient(table)
+        await table.channel.send(f"🛑 **방을 닫았어요**\n{reason}")
+        await table.leave_voice()
+        return
     ranking = sorted(r.players, key=lambda p: -p.points)
     board = "\n".join(f"{i+1}위 **{p.name}** — {p.points}점"
                       for i, p in enumerate(ranking))
@@ -1483,6 +1489,31 @@ async def sound_cmd(ctx, args: list[str]):
     total = len(sound_variants(name, ctx.guild.id))
     extra = f"\n이제 `{name}` 은 **{total}종 중 랜덤**으로 재생돼요 🎲" if total > 1 else ""
     await ctx.send(f"✅ `{name}` 효과음 **{len(saved)}개** 등록! ({', '.join(saved)}){extra}")
+
+
+# ---------------------------------------------------------------------------
+# force-stop (`!mj stop`) — escape hatch for a game that got stuck
+# ---------------------------------------------------------------------------
+async def stop_cmd(ctx):
+    """Abort the channel's game.
+
+    🎌 종료 only appears between hands, so a game that wedges mid-hand used to
+    leave the channel unusable — `!mj` just kept answering "이미 이 채널에
+    게임이 있어요" with no way out short of restarting the bot.
+    """
+    table = tables.get(ctx.channel.id)
+    if table is None:
+        await ctx.send("이 채널에 진행 중인 대국이 없어요. `!mj` 로 새로 열 수 있어요.")
+        return
+
+    perms = getattr(ctx.author, "guild_permissions", None)
+    is_admin = bool(perms and (perms.manage_guild or perms.administrator))
+    if table.host_id != ctx.author.id and not is_admin:
+        await ctx.send("**방장** 또는 **서버 관리자**만 강제 종료할 수 있어요.")
+        return
+
+    await end_game(table, f"{ctx.author.display_name} 님이 강제 종료했습니다.")
+    await ctx.send("정리했어요. `!mj` 로 새 판을 열 수 있어요 🀄")
 
 
 # ---------------------------------------------------------------------------
@@ -1630,7 +1661,8 @@ async def mj_cmd(ctx, arg: str = None, *rest: str):
             "· 💻 **DM(PC)**: 손패가 DM으로 자동으로 와요 (DM 허용 필요)\n"
             "남이 버리면 **🔔 콜**(채널) 또는 DM으로 론/퐁/치/깡/스킵 버튼이 떠요.\n"
             "🔊 효과음: `!mj sound` (서버 관리자만 등록/삭제 가능)\n"
-            "🎙 `!mj voice` — 봇을 지금 내 음성 채널로 부르기 (`!mj voice leave` 는 내보내기)")
+            "🎙 `!mj voice` — 봇을 지금 내 음성 채널로 부르기 (`!mj voice leave` 는 내보내기)\n"
+            "🛑 `!mj stop` — 진행 중인 판이 꼬였을 때 강제 종료 (방장·서버 관리자)")
         return
     if arg in ("sound", "효과음"):
         await sound_cmd(ctx, list(rest))
@@ -1640,6 +1672,9 @@ async def mj_cmd(ctx, arg: str = None, *rest: str):
         return
     if arg in ("voice", "음성", "보이스"):
         await voice_cmd(ctx, list(rest))
+        return
+    if arg in ("stop", "종료", "그만", "reset", "리셋"):
+        await stop_cmd(ctx)
         return
     if ctx.guild is None:
         # DM 에서는 로비를 열 수 없어요 — 여러 명이 참가해야 하고, 나만 보이는
