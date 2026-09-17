@@ -1233,6 +1233,7 @@ async def _lobby_expiry(table: Table):
                 view=None)
         except discord.HTTPException:
             pass
+    await archive_space(table)
 
 
 async def _turn_afk(table: Table, seat: int, ndiscards: int, rnd, token: int):
@@ -1411,6 +1412,7 @@ async def end_game(table: Table, reason: str):
     await clear_transient(table)  # 진행용 메시지·버튼을 치우고 결과만 남겨요
     await table.channel.send(f"🎌 **대국 종료**\n{reason}\n{board}")
     await table.leave_voice()
+    await archive_space(table)
 
 
 # ---------------------------------------------------------------------------
@@ -1528,6 +1530,55 @@ async def sound_cmd(ctx, args: list[str]):
 
 
 # ---------------------------------------------------------------------------
+# where a game lives
+# ---------------------------------------------------------------------------
+def find_table(ctx) -> "Table | None":
+    """The game for this channel — or for a thread hanging off it."""
+    t = tables.get(ctx.channel.id)
+    if t is not None:
+        return t
+    return next((t for t in tables.values()
+                 if getattr(t.channel, "parent_id", None) == ctx.channel.id), None)
+
+
+async def archive_space(table: "Table") -> None:
+    """Tidy the thread away once its game is over (still readable)."""
+    ch = table.channel
+    if isinstance(ch, discord.Thread) and not ch.archived:
+        try:
+            await ch.edit(archived=True)
+        except discord.HTTPException:
+            pass
+
+
+async def open_game_space(ctx, size: int):
+    """Run the game in its own thread when we can.
+
+    A game posts a lot — board edits, turn pings, call alerts — and in a busy
+    channel that both buries the board and shows notices to people who are not
+    playing. A thread keeps all of it out of the channel, and anyone who does
+    not join the thread never sees it.
+
+    Falls back to the current channel when threads are unavailable (missing
+    permission, already inside a thread, a DM, or an API refusal), so the bot
+    keeps working without re-inviting it.
+    """
+    channel = ctx.channel
+    if isinstance(channel, discord.Thread) or ctx.guild is None:
+        return channel
+    perms = channel.permissions_for(ctx.guild.me)
+    if not (perms.create_public_threads and perms.send_messages_in_threads):
+        return channel
+    try:
+        return await ctx.message.create_thread(
+            name=f"🀄 {size}인 마작 · {ctx.author.display_name}",
+            auto_archive_duration=1440)  # 하루 동안 조용하면 보관
+    except discord.HTTPException as exc:
+        print(f"[thread] create failed: {exc}", flush=True)
+        return channel
+
+
+# ---------------------------------------------------------------------------
 # force-stop (`!mj stop`) — escape hatch for a game that got stuck
 # ---------------------------------------------------------------------------
 async def stop_cmd(ctx):
@@ -1537,7 +1588,7 @@ async def stop_cmd(ctx):
     leave the channel unusable — `!mj` just kept answering "이미 이 채널에
     게임이 있어요" with no way out short of restarting the bot.
     """
-    table = tables.get(ctx.channel.id)
+    table = find_table(ctx)
     if table is None:
         await ctx.send("이 채널에 진행 중인 대국이 없어요. `!mj` 로 새로 열 수 있어요.")
         return
@@ -1556,7 +1607,7 @@ async def stop_cmd(ctx):
 # voice channel (`!mj voice`) — call the bot in or send it away mid-game
 # ---------------------------------------------------------------------------
 async def voice_cmd(ctx, args: list[str]):
-    table = tables.get(ctx.channel.id)
+    table = find_table(ctx)
     if table is None:
         await ctx.send("이 채널에 진행 중인 대국이 없어요. 먼저 `!mj` 로 방을 열어주세요.")
         return
@@ -1740,15 +1791,24 @@ async def mj_cmd(ctx, arg: str = None, *rest: str):
     if ctx.channel.id in tables:
         await ctx.send("이미 이 채널에 게임이 있어요.")
         return
-    t = Table(ctx.channel, size)
+    busy = next((t for t in tables.values()
+                 if getattr(t.channel, "parent_id", None) == ctx.channel.id), None)
+    if busy is not None:
+        await ctx.send(f"이미 진행 중인 판이 있어요 → {busy.channel.mention}")
+        return
+
+    channel = await open_game_space(ctx, size)
+    t = Table(channel, size)
     t.host_id = ctx.author.id
     t.add_human(ctx.author)
-    tables[ctx.channel.id] = t
+    tables[channel.id] = t
     # if the caller is in a voice channel, join it for sound effects
     await t.join_voice(ctx.author)
     view = LobbyView(t)
-    t.lobby_msg = await ctx.send(view._text(), view=view)
+    t.lobby_msg = await channel.send(view._text(), view=view)
     t.touch_lobby()  # 아무도 안 들어오면 자동으로 닫혀요
+    if channel.id != ctx.channel.id:
+        await ctx.send(f"🀄 {size}인 마작 판을 {channel.mention} 에 열었어요!")
 
 
 @bot.event
