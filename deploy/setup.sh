@@ -87,7 +87,9 @@ echo "==> 파이썬: $($PY --version 2>&1)"
 # --- 2. 코드 받기 (git 없으면 tarball 로) ------------------------------------
 echo "==> 코드 받기 ($BRANCH)"
 sudo mkdir -p "$DEST"
-sudo chown "$BOT_USER":"$BOT_USER" "$DEST"
+# -R 이 중요해요: 자동 배포는 root 로 돌기 때문에, 폴더만 chown 하면 그 안의
+# 파일들이 root 소유로 남아 다음에 사람이 직접 실행할 때 덮어쓰지 못해요.
+sudo chown -R "$BOT_USER":"$BOT_USER" "$DEST"
 if [ -d "$DEST/.git" ] && have git; then
   git -C "$DEST" fetch origin "$BRANCH"
   git -C "$DEST" checkout "$BRANCH"
@@ -97,8 +99,11 @@ elif have git; then
 else
   # git 이 없으면 굳이 설치하지 않고 tarball 로 받습니다 (패키지 설치 회피)
   echo "    git 이 없어서 tarball 로 받아요"
-  curl -fsSL "$TARBALL" | tar xz -C "$DEST" --strip-components=1
+  curl -fsSL "$TARBALL" | tar xz --overwrite -C "$DEST" --strip-components=1
 fi
+
+# root 로 실행됐다면 방금 받은 파일도 root 소유예요. 봇 계정으로 되돌려 둡니다.
+sudo chown -R "$BOT_USER":"$BOT_USER" "$DEST"
 
 # --- 3. 가상환경 & 의존성 ----------------------------------------------------
 echo "==> 가상환경 & 의존성 ($PY)"
