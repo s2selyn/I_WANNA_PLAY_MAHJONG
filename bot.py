@@ -578,16 +578,41 @@ def board_text(table: Table, note: str = "") -> str:
     return head + "\n\n" + "\n".join(rows)
 
 
-async def update_board(table: Table, note: str = "") -> None:
-    """Send the shared floor once, then edit it in place on every change."""
-    content = board_text(table, note)
-    if table.board_msg is None:
-        table.board_msg = await send_transient(table, content)
-    else:
+BOARD_FOOTER = ("\n\u2500\u2500\u2500\n"
+                "🎴 내 손패 · 🔔 콜 · ⚙️ 내 방식 · 🚪 나가기")
+
+
+async def update_board(table: Table, note: str = "", bump: bool = False) -> None:
+    """Keep the shared floor up to date, and optionally move it to the bottom.
+
+    Discord has no sticky message, so the only way to keep the board in view
+    is to make it the newest message. Anything we post after it (turn pings,
+    call alerts) buries it, so those callers pass ``bump=True`` to have it
+    re-posted underneath. The controls ride along on the same message, so the
+    board and its buttons are always together at the bottom.
+    """
+    content = board_text(table, note) + BOARD_FOOTER
+    old = table.board_msg
+    if old is not None and not bump:
         try:
-            await table.board_msg.edit(content=content)
+            await old.edit(content=content)
+            return
         except discord.HTTPException:
-            table.board_msg = await send_transient(table, content)
+            pass  # 지워졌으면 아래에서 새로 띄워요
+    table.board_msg = await send_transient(table, content, view=ControlView(table))
+    if old is not None:
+        if old in table.transient:
+            table.transient.remove(old)
+        try:
+            await old.delete()
+        except discord.HTTPException:
+            pass
+
+
+async def bump_board(table: Table) -> None:
+    """Re-post the board so it sits below whatever was just sent."""
+    if table.board_msg is not None and table.round is not None:
+        await update_board(table, bump=True)
 
 
 def turn_content(table: Table, p: Player) -> str:
@@ -1144,13 +1169,7 @@ async def start_round(table: Table):
     )
     table.started = True
     table.board_msg = None   # fresh floor for the new round
-    await update_board(table)
-    # 방식과 무관하게 항상 띄워요 — 각자 **⚙️ 내 방식** 으로 바꿀 수 있으니까요
-    table.control_msg = await send_transient(
-        table,
-        "📱 아래 버튼으로 진행하세요 — 손패는 **나만 보여요**.\n"
-        "PC라서 DM으로 받고 싶으면 **⚙️ 내 방식** 을 눌러 개인 설정을 바꾸세요.",
-        view=ControlView(table))
+    await update_board(table)   # 버튼도 이 메시지에 함께 붙어요
     await advance(table)
 
 
@@ -1181,6 +1200,7 @@ async def send_turn(table: Table, seat: int):
     # channel mode: no DM push; nudge the player to tap 🎴 내 손패
     await send_notice(table, "turn",
                       f"▶️ <@{p.user_id}> 님 차례 — **🎴 내 손패** 를 누르세요")
+    await bump_board(table)  # 알림 아래로 보드를 다시 내려요
 
 
 async def report_error(table: "Table") -> None:
@@ -1275,6 +1295,7 @@ async def run_call_window(table: Table):
         + ", ".join(f"<@{r.players[s].user_id}>" for s in table.call_eligible)
         + f" {where}",
         view=CallNoticeView(table))
+    await bump_board(table)
 
     table.call_task = asyncio.create_task(_call_timer(table))
 
@@ -1403,6 +1424,7 @@ async def resolve_calls(table: Table):
         (r.call_pon if a == "pon" else r.call_kan)(s)
         play_sound(table, a)  # pon / kan
         await send_transient(table, f"**{r.players[s].name}** {'퐁' if a == 'pon' else '깡'}!")
+        await bump_board(table)
         if a == "kan":
             await update_board(table)
         await advance(table)
@@ -1413,6 +1435,7 @@ async def resolve_calls(table: Table):
         r.call_chi(s, list(combo))
         play_sound(table, "chi")
         await send_transient(table, f"**{r.players[s].name}** 치!")
+        await bump_board(table)
         await advance(table)
         return
     r.pass_calls()
