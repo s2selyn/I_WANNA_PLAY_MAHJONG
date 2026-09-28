@@ -301,6 +301,17 @@ class Table:
         # wakes up late can tell it is stale and do nothing.
         self.afk_task: asyncio.Task | None = None
         self.turn_token = 0
+        # call_token does the same for a call window: a CallView built for an
+        # earlier discard must not be able to apply its choice to a later one.
+        self.call_token = 0
+
+        # 열려 있는 비공개 손패 패널(자리 → interaction). 차례가 넘어가면 닫아요.
+        self.hand_panels: dict[int, discord.Interaction] = {}
+        # DM 방식 플레이어에게 보낸 마지막 손패 DM (자리 → 메시지)
+        self.dm_msgs: dict[int, discord.Message] = {}
+
+        # 대국 길이: "east"(동풍전) · "hanchan"(반장) · "endless"(무제한)
+        self.length = "east"
 
     # lobby ----------------------------------------------------------------
     def add_human(self, user) -> bool:
@@ -472,6 +483,38 @@ async def clear_transient(table: Table) -> None:
             await m.delete()
         except discord.HTTPException:
             pass  # 이미 지워졌거나 권한이 없어도 그냥 넘어가요
+
+
+async def close_hand_panels(table: "Table", seat: int | None = None) -> None:
+    """Close the private hand panels that are no longer actionable.
+
+    The panel only closes itself when the player presses something. If the
+    turn moves on any other way — the AFK timer discards for them, a call
+    steals the turn, the hand ends — their panel would otherwise sit there
+    showing a hand they can no longer play.
+    """
+    seats = [seat] if seat is not None else list(table.hand_panels)
+    for s in seats:
+        inter = table.hand_panels.pop(s, None)
+        if inter is None:
+            continue
+        try:
+            await inter.delete_original_response()
+        except discord.HTTPException:
+            pass
+
+
+async def clear_dm_msgs(table: "Table", seat: int | None = None) -> None:
+    """Drop the hand DMs we sent, so a game doesn't leave a pile in the DM."""
+    seats = [seat] if seat is not None else list(table.dm_msgs)
+    for s in seats:
+        msg = table.dm_msgs.pop(s, None)
+        if msg is None:
+            continue
+        try:
+            await msg.delete()
+        except discord.HTTPException:
+            pass
 
 
 async def dismiss(interaction: discord.Interaction, fallback: str = "완료") -> None:
@@ -704,6 +747,9 @@ class CallView(discord.ui.View):
         super().__init__(timeout=CALL_TIMEOUT + 5)
         self.table = table
         self.seat = seat
+        # 이 패널이 어느 콜 창에 속하는지. 다음 콜 창에서 옛 버튼을 눌러도
+        # 그때의 선택(특히 치 조합)이 적용되지 않도록 막아요.
+        self.token = table.call_token
         if options.get("ron"):
             self.add_item(Btn("🀄 론", self._make("ron"), style=discord.ButtonStyle.success))
         if options.get("pon"):
@@ -725,7 +771,7 @@ class CallView(discord.ui.View):
                 await dismiss(interaction, "이미 끝난 대국이에요.")
                 return
             await dismiss(interaction, self._LABEL.get(action, action))
-            await record_call(self.table, self.seat, action, value)
+            await record_call(self.table, self.seat, action, value, self.token)
         return cb
 
 
@@ -849,6 +895,7 @@ class ControlView(discord.ui.View):
         if r.phase == "action" and r.turn == seat:
             await interaction.response.send_message(
                 turn_content(t, p), view=TurnView(t, seat), ephemeral=True)
+            t.hand_panels[seat] = interaction  # 차례가 끝나면 닫아주려고 기억해요
         else:
             await interaction.response.send_message(
                 readonly_hand_content(t, p), ephemeral=True)
@@ -879,6 +926,7 @@ class LobbyView(discord.ui.View):
         self.add_item(Btn("⚙️ 내 방식", self._my_mode, style=discord.ButtonStyle.secondary))
         self.add_item(Btn("AI 추가", self._ai, style=discord.ButtonStyle.secondary))
         self.add_item(Btn("기본 방식 전환", self._mode, style=discord.ButtonStyle.secondary))
+        self.add_item(Btn("대국 길이", self._length, style=discord.ButtonStyle.secondary))
         self.add_item(Btn("시작", self._start, style=discord.ButtonStyle.primary))
         self.add_item(Btn("빈자리 AI 채우고 시작", self._fill_start,
                           style=discord.ButtonStyle.primary))
@@ -900,6 +948,7 @@ class LobbyView(discord.ui.View):
         mode = ("📱 채널(모바일: 나만 보이는 손패)" if t.mode == "channel"
                 else "💻 DM(PC: 손패 자동 전송)")
         return (f"🀄 **{t.size}인 리치마작 로비** ({len(t.seats)}/{t.size}){host}\n{names}\n\n"
+                f"대국 길이: **{LENGTH_LABEL[t.length]}**\n"
                 f"손패 방식(기본값): **{mode}**　_**⚙️ 내 방식** 으로 각자 따로 정할 수 있어요_\n"
                 f"**참가**·**나가기**·**⚙️ 내 방식**은 누구나 · 시작/취소/AI/기본방식은 **방장 전용** 👑")
 
@@ -923,6 +972,15 @@ class LobbyView(discord.ui.View):
             return await self._deny(interaction)
         self.table.mode = "dm" if self.table.mode == "channel" else "channel"
         self.table.touch_lobby()
+        await interaction.response.edit_message(content=self._text(), view=self)
+
+    async def _length(self, interaction):
+        """Cycle 동풍전 → 반장 → 무제한 (host only)."""
+        if not self._is_host(interaction):
+            return await self._deny(interaction)
+        t = self.table
+        t.length = LENGTHS[(LENGTHS.index(t.length) + 1) % len(LENGTHS)]
+        t.touch_lobby()
         await interaction.response.edit_message(content=self._text(), view=self)
 
     async def _my_mode(self, interaction):
@@ -1106,10 +1164,14 @@ async def send_turn(table: Table, seat: int):
     table.turn_token += 1
     table.afk_task = asyncio.create_task(
         _turn_afk(table, seat, len(p.discards), table.round, table.turn_token))
+    await close_hand_panels(table)  # 지난 차례의 비공개 패널은 닫아요
     if table.mode_of(p.user_id) == "dm":
         try:
             dm = await dm_of(p.user_id)
-            await dm.send(content=turn_content(table, p), view=TurnView(table, seat))
+            # 매 턴 새 DM 이 쌓이지 않게 직전 손패 DM 은 지우고 보냅니다
+            await clear_dm_msgs(table, seat)
+            table.dm_msgs[seat] = await dm.send(
+                content=turn_content(table, p), view=TurnView(table, seat))
             await clear_notice(table, "turn")  # DM 으로 갔으니 채널 알림은 치워요
             return
         except discord.Forbidden:
@@ -1119,6 +1181,18 @@ async def send_turn(table: Table, seat: int):
     # channel mode: no DM push; nudge the player to tap 🎴 내 손패
     await send_notice(table, "turn",
                       f"▶️ <@{p.user_id}> 님 차례 — **🎴 내 손패** 를 누르세요")
+
+
+async def report_error(table: "Table") -> None:
+    """Surface a crash in the game loop instead of letting the table wedge."""
+    traceback.print_exc()
+    if is_live(table):
+        try:
+            await table.channel.send(
+                "⚠️ 진행 중 오류가 났어요. **`!mj stop`** 으로 정리한 뒤 "
+                "`!mj` 로 다시 시작해주세요.")
+        except discord.HTTPException:
+            pass
 
 
 async def advance(table: Table):
@@ -1132,14 +1206,7 @@ async def advance(table: Table):
     try:
         await _advance(table)
     except Exception:
-        traceback.print_exc()
-        if is_live(table):
-            try:
-                await table.channel.send(
-                    "⚠️ 진행 중 오류가 났어요. **`!mj stop`** 으로 정리한 뒤 "
-                    "`!mj` 로 다시 시작해주세요.")
-            except discord.HTTPException:
-                pass
+        await report_error(table)
 
 
 async def _advance(table: Table):
@@ -1178,6 +1245,7 @@ async def run_call_window(table: Table):
     tile = (r.pending_kakan[1] if r.pending_kakan else r.last_discard[1])
     table.awaiting = True
     table.call_resolved = False
+    table.call_token += 1
     table.call_choices = {}
     table.call_messages = {}
     table.call_eligible = {s for s in r.pending_calls if not r.players[s].is_ai}
@@ -1253,6 +1321,8 @@ async def _turn_afk(table: Table, seat: int, ndiscards: int, rnd, token: int):
         p = r.players[seat]
         tile = p.drawn or p.sorted_hand()[-1]
         r.discard(tile)
+        await close_hand_panels(table, seat)  # 열어둔 손패 패널이 남지 않게
+        await clear_dm_msgs(table, seat)
         await announce_discard(table, p, tile)
         await advance(table)
 
@@ -1265,9 +1335,37 @@ async def _call_timer(table: Table):
     await resolve_calls(table)
 
 
-async def record_call(table: Table, seat: int, action: str, value):
+def call_is_available(table: Table, seat: int, action: str, value) -> bool:
+    """Is this exact call still on the table right now?"""
+    if action == "skip":
+        return True
+    opts = (table.round.pending_calls or {}).get(seat) or {}
+    if action == "chi":
+        want = [(t.kind, t.aka) for t in (value or [])]
+        return any([(t.kind, t.aka) for t in combo] == want
+                   for combo in opts.get("chi", []))
+    return bool(opts.get(action))
+
+
+async def record_call(table: Table, seat: int, action: str, value,
+                      token: int | None = None):
+    try:
+        await _record_call(table, seat, action, value, token)
+    except Exception:
+        await report_error(table)
+
+
+async def _record_call(table: Table, seat: int, action: str, value,
+                       token: int | None = None):
     if not is_live(table) or not table.awaiting or seat not in table.call_eligible:
         return
+    if token is not None and token != table.call_token:
+        return  # 지난 콜 창의 버튼 — 지금 판에 적용하면 안 돼요
+    if seat in table.call_choices:
+        return  # 이미 답했어요 (연타 방지)
+    if not call_is_available(table, seat, action, value):
+        # 창이 바뀌었거나 이미 처리된 콜. 판을 깨뜨리지 말고 스킵으로 처리해요.
+        action, value = "skip", None
     table.call_choices[seat] = (action, value)
     # a ron resolves immediately; otherwise wait until everyone answered
     if action == "ron" or set(table.call_choices) >= table.call_eligible:
@@ -1285,13 +1383,13 @@ async def resolve_calls(table: Table):
     r = table.round
     choices = table.call_choices
 
-    # disable any outstanding call DMs
-    for s, msg in table.call_messages.items():
-        if s not in choices:
-            try:
-                await msg.edit(content="⏱️ 시간 초과 (스킵)", view=None)
-            except discord.HTTPException:
-                pass
+    # 남아 있는 콜 DM 은 지워요 (그대로 두면 DM 에 계속 쌓여요)
+    for msg in table.call_messages.values():
+        try:
+            await msg.delete()
+        except discord.HTTPException:
+            pass
+    table.call_messages = {}
 
     ronners = [s for s, (a, _) in choices.items() if a == "ron"]
     if ronners:
@@ -1322,9 +1420,11 @@ async def resolve_calls(table: Table):
 
 
 async def finish_round(table: Table):
-    # 국이 끝났으니 남아 있는 차례/콜 알림은 의미가 없어요
+    # 국이 끝났으니 남아 있는 차례/콜 알림·손패 패널은 의미가 없어요
     await clear_notice(table, "turn")
     await clear_notice(table, "call")
+    await close_hand_panels(table)
+    await clear_dm_msgs(table)
     r = table.round
     res = r.result
     lines = []
@@ -1355,8 +1455,9 @@ async def finish_round(table: Table):
             table.round_wind_idx = min(table.round_wind_idx + 1, 3)
 
     table.started = False
-    if any(p.points < 0 for p in r.players):
-        await end_game(table, "누군가 점수가 0 미만이 되어 종료합니다.")
+    over = game_over_reason(table)
+    if over:
+        await end_game(table, over)
         return
     await send_transient(table, "다음 국은 아래 **다음 국** 버튼으로!", view=NextView(table))
 
@@ -1398,6 +1499,8 @@ async def end_game(table: Table, reason: str):
         return  # 이미 종료된 대국 (버튼 중복 클릭 등)
     table.cancel_timers()  # 남은 타이머가 끝난 판을 건드리지 않게
     table.started = False
+    await close_hand_panels(table)
+    await clear_dm_msgs(table)
     r = table.round
     if r is None:  # 아직 한 국도 시작하지 않은 방 (로비만 있던 상태)
         tables.pop(table.channel.id, None)
@@ -1532,6 +1635,28 @@ async def sound_cmd(ctx, args: list[str]):
 # ---------------------------------------------------------------------------
 # where a game lives
 # ---------------------------------------------------------------------------
+LENGTHS = ("east", "hanchan", "endless")
+LENGTH_LABEL = {"east": "🀀 동풍전 (동1~4국)",
+                "hanchan": "🀁 반장 (동1~남4국)",
+                "endless": "♾️ 무제한 (점수 0 미만까지)"}
+# 몇 번째 장까지 도느냐: 동=0, 남=1
+LENGTH_LAST_WIND = {"east": 0, "hanchan": 1}
+
+
+def game_over_reason(table: "Table") -> str | None:
+    """Why the game should end now — or None to keep playing.
+
+    Checked after the dealer/round rotation in finish_round, so round_wind_idx
+    has already moved past the final hand when the set is complete.
+    """
+    if any(p.points < 0 for p in table.round.players):
+        return "누군가 점수가 0 미만이 되어 종료합니다."
+    last = LENGTH_LAST_WIND.get(table.length)
+    if last is not None and table.round_wind_idx > last:
+        return f"{LENGTH_LABEL[table.length].split()[1]}이 끝났습니다."
+    return None
+
+
 def find_table(ctx) -> "Table | None":
     """The game for this channel — or for a thread hanging off it."""
     t = tables.get(ctx.channel.id)
